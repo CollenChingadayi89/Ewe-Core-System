@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 from pathlib import Path
+from datetime import timedelta
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,12 +22,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-%d!e#@psnso#+25+#&tz7p!$qgh3l+7^9jphp+2&)b4d5g2dt2'
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-%d!e#@psnso#+25+#&tz7p!$qgh3l+7^9jphp+2&)b4d5g2dt2')
+
+# CRYPTOGRAPHY KEY for django-cryptography (field-level encryption)
+# SECURITY WARNING: keep this key secret and never commit it to version control!
+# In production, generate a secure key using: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+CRYPTOGRAPHY_KEY = os.environ.get('CRYPTOGRAPHY_KEY', 'vZ8vF3mK9qN2rT5wX7yB1cE4hJ6lM8pR0sU3vY5zA9dF2gH4jK7n')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 
 # Application definition
@@ -38,12 +45,42 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'Services'
+
+    # Third-party apps
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'drf_spectacular',
+    'corsheaders',
+    'django_filters',
+
+    # Custom apps
+    'core',
+    'accounts',
+    'audit_log',  # Forensic tracking and compliance
+    'hr_department',
+    'hr_employee',
+    'hr_leave',
+    'hr_attendance',
+    'sacco_member',
+    'crm',  # Customer Relationship Management
+    'finance_document',  # Invoices, Estimates, Payments
+    'finance_receivable',
+    'finance_payable',
+    'finance_expense',
+    'finance_petty_cash',
+    'finance_procurement',
+    'approval',
+    'asset',
+    'vehicle',
+    'document',
+    'onboarding',
+    'notification',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # CORS middleware (must be before CommonMiddleware)
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -74,12 +111,28 @@ WSGI_APPLICATION = 'Sacco_Project.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
+# PostgreSQL Configuration
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('DATABASE_NAME', 'Ewe-core-db'),
+        'USER': os.environ.get('DATABASE_USER', 'postgres'),
+        'PASSWORD': os.environ.get('DATABASE_PASSWORD', 'c011en89'),
+        'HOST': os.environ.get('DATABASE_HOST', 'localhost'),
+        'PORT': os.environ.get('DATABASE_PORT', '5432'),
     }
 }
+
+# SQLite Configuration (for development only)
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
+
+# Custom User Model
+AUTH_USER_MODEL = 'accounts.User'
 
 
 # Password validation
@@ -106,7 +159,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Africa/Harare'  # Zimbabwe timezone
 
 USE_I18N = True
 
@@ -117,6 +170,11 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# Media files (User uploads)
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 
 # Email
@@ -127,3 +185,345 @@ MAILERS = {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
 }
+
+JAZZMIN_SETTINGS = {
+    # title of the window (Will default to current_admin_site.site_title if absent or None)
+    "site_title": "EWE-CORE Admin",
+
+    # Title on the login screen (19 chars max) (defaults to current_admin_site.site_header if absent or None)
+    "site_header": "EWE-CORE",
+
+    # Title on the brand (19 chars max) (defaults to current_admin_site.site_header if absent or None)
+    "site_brand": "EWE-CORE Admin",
+
+    # Logo to use for your site, must be present in static files, used for brand on top left
+    "site_logo": None,
+
+    # Logo to use for your site, must be present in static files, used for login form logo (defaults to site_logo)
+    "login_logo": None,
+
+    # Logo to use for login form in dark themes (defaults to login_logo)
+    "login_logo_dark": None,
+
+    # CSS classes that are applied to the logo above
+    "site_logo_classes": "img-circle",
+
+    # Relative path to a favicon for your site, will default to site_logo if absent (ideally 32x32 px)
+    "site_icon": None,
+
+    # Welcome text on the login screen
+    "welcome_sign": "Welcome to Central Operations Resourse Engine System",
+
+    # Copyright on the footer
+    "copyright": "EWE-CORE ",
+
+    # List of model admins to search from the search bar, search bar omitted if excluded
+    # If you want to use a single search field you dont need to use a list, you can use a simple string
+    "search_model": ["accounts.User", "hr_employee.Employee", "sacco_member.Member"],
+
+    # Field name on user model that contains avatar ImageField/URLField/Charfield or a callable that receives the user
+    "user_avatar": None,
+
+    ############
+    # Top Menu #
+    ############
+
+    # Links to put along the top menu
+    "topmenu_links": [
+        # Url that gets reversed (Permissions can be added)
+        {"name": "Home",  "url": "admin:index", "permissions": ["accounts.view_user"]},
+
+        # Quick links to main sections
+        {"name": "API Docs", "url": "/api/docs/", "new_window": True},
+
+        # App dropdowns
+        {"app": "hr_employee"},
+        {"app": "sacco_member"},
+    ],
+
+    #############
+    # User Menu #
+    #############
+
+    # Additional links to include in the user menu on the top right ("app" url type is not allowed)
+    "usermenu_links": [
+        {"name": "API Root", "url": "/api/", "new_window": True},
+        {"model": "accounts.User"}
+    ],
+
+    #############
+    # Side Menu #
+    #############
+
+    # Whether to display the side menu
+    "show_sidebar": True,
+
+    # Whether to aut expand the menu
+    "navigation_expanded": True,
+
+    # Hide these apps when generating side menu e.g (auth)
+    "hide_apps": [],
+
+    # Hide these models when generating side menu (e.g auth.user)
+    "hide_models": [],
+
+    # List of apps (and/or models) to base side menu ordering off of (does not need to contain all apps/models)
+    "order_with_respect_to": [
+        "accounts",
+        "hr_department",
+        "hr_employee",
+        "hr_leave",
+        "hr_attendance",
+        "sacco_member",
+        "crm",
+        "finance_document",
+        "finance_receivable",
+        "finance_payable",
+        "finance_expense",
+        "finance_petty_cash",
+        "finance_procurement",
+        "asset",
+        "vehicle",
+        "document",
+        "onboarding",
+        "notification",
+        "approval"
+    ],
+
+    # Custom links to append to app groups, keyed on app name
+    "custom_links": {},
+
+    # Custom icons for side menu apps/models See https://fontawesome.com/icons?d=gallery&m=free&v=5.0.0,5.0.1,5.0.10,5.0.11,5.0.12,5.0.13,5.0.2,5.0.3,5.0.4,5.0.5,5.0.6,5.0.7,5.0.8,5.0.9,5.1.0,5.1.1,5.2.0,5.3.0,5.3.1,5.4.0,5.4.1,5.4.2,5.13.0,5.12.0,5.11.2,5.11.1,5.10.0,5.9.0,5.8.2,5.8.1,5.7.2,5.7.1,5.7.0,5.6.3,5.5.0,5.4.2
+    # for the full list of 5.13.0 free icon classes
+    "icons": {
+        # Accounts
+        "accounts": "fas fa-users-cog",
+        "accounts.User": "fas fa-user",
+
+        # HR Department
+        "hr_department": "fas fa-building",
+        "hr_department.Department": "fas fa-sitemap",
+        "hr_department.Designation": "fas fa-user-tag",
+
+        # HR Employee
+        "hr_employee": "fas fa-users",
+        "hr_employee.Employee": "fas fa-id-card",
+        "hr_employee.EmployeeSalary": "fas fa-money-bill-wave",
+        "hr_employee.EmployeeBankDetails": "fas fa-university",
+        "hr_employee.EmployeeEmergencyContact": "fas fa-phone-alt",
+        "hr_employee.EmployeeTax": "fas fa-file-invoice-dollar",
+
+        # HR Leave
+        "hr_leave": "fas fa-calendar-alt",
+        "hr_leave.LeavePolicy": "fas fa-clipboard-list",
+        "hr_leave.LeaveTransaction": "fas fa-exchange-alt",
+        "hr_leave.LeaveRequest": "fas fa-calendar-check",
+        "hr_leave.PublicHoliday": "fas fa-calendar-day",
+        "hr_leave.WorkingHours": "fas fa-clock",
+
+        # HR Attendance
+        "hr_attendance": "fas fa-user-check",
+        "hr_attendance.Attendance": "fas fa-clipboard-check",
+
+        # SACCO Member
+        "sacco_member": "fas fa-users",
+        "sacco_member.Member": "fas fa-user-circle",
+
+        # CRM
+        "crm": "fas fa-handshake",
+        "crm.Client": "fas fa-user-tie",
+        "crm.Company": "fas fa-building",
+        "crm.Contact": "fas fa-address-book",
+        "crm.Deal": "fas fa-handshake",
+        "crm.Project": "fas fa-project-diagram",
+        "crm.Ticket": "fas fa-ticket-alt",
+
+        # Finance Documents
+        "finance_document": "fas fa-file-invoice-dollar",
+        "finance_document.Invoice": "fas fa-file-invoice",
+        "finance_document.Estimate": "fas fa-file-contract",
+        "finance_document.Payment": "fas fa-money-check-alt",
+
+        # Finance Receivable
+        "finance_receivable": "fas fa-hand-holding-usd",
+        "finance_receivable.Receivable": "fas fa-file-invoice",
+        "finance_receivable.ReceivablePayment": "fas fa-credit-card",
+
+        # Finance Payable
+        "finance_payable": "fas fa-file-invoice-dollar",
+        "finance_payable.Vendor": "fas fa-truck",
+        "finance_payable.Payable": "fas fa-money-check",
+
+        # Finance Expense
+        "finance_expense": "fas fa-receipt",
+        "finance_expense.Expense": "fas fa-wallet",
+
+        # Finance Petty Cash
+        "finance_petty_cash": "fas fa-cash-register",
+        "finance_petty_cash.PettyCash": "fas fa-coins",
+
+        # Finance Procurement
+        "finance_procurement": "fas fa-shopping-cart",
+        "finance_procurement.ProcurementRequest": "fas fa-shopping-bag",
+
+        # Asset
+        "asset": "fas fa-laptop",
+        "asset.Asset": "fas fa-desktop",
+
+        # Vehicle
+        "vehicle": "fas fa-car",
+        "vehicle.Vehicle": "fas fa-car-side",
+
+        # Document
+        "document": "fas fa-folder",
+        "document.DocumentCategory": "fas fa-folder-open",
+        "document.Document": "fas fa-file-alt",
+
+        # Onboarding
+        "onboarding": "fas fa-user-plus",
+        "onboarding.Onboarding": "fas fa-tasks",
+
+        # Notification
+        "notification": "fas fa-bell",
+        "notification.Notification": "fas fa-envelope",
+
+        # Approval
+        "approval": "fas fa-check-circle",
+        "approval.ApprovalWorkflow": "fas fa-project-diagram",
+        "approval.ApprovalRequest": "fas fa-clipboard-check",
+        "approval.ApprovalStep": "fas fa-step-forward",
+    },
+    # Icons that are used when one is not manually specified
+    "default_icon_parents": "fas fa-chevron-circle-right",
+    "default_icon_children": "fas fa-circle",
+
+    #################
+    # Related Modal #
+    #################
+    # Use modals instead of popups
+    "related_modal_active": False,
+
+    #############
+    # UI Tweaks #
+    #############
+    # Relative paths to custom CSS/JS scripts (must be present in static files)
+    "custom_css": None,
+    "custom_js": None,
+    # Whether to link font from fonts.googleapis.com (use custom_css to supply font otherwise)
+    "use_google_fonts_cdn": True,
+    # Whether to show the UI customizer on the sidebar
+    "show_ui_builder": False,
+
+    ###############
+    # Change view #
+    ###############
+    # Render out the change view as a single form, or in tabs, current options are
+    # - single
+    # - horizontal_tabs (default)
+    # - vertical_tabs
+    # - collapsible
+    # - carousel
+    "changeform_format": "horizontal_tabs",
+    # override change forms on a per modeladmin basis
+    "changeform_format_overrides": {"auth.user": "collapsible", "auth.group": "vertical_tabs"},
+    # Add a language dropdown into the admin
+    "language_chooser": True,
+}
+
+# ============================================================================
+# REST FRAMEWORK CONFIGURATION
+# ============================================================================
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend',
+        'rest_framework.filters.SearchFilter',
+        'rest_framework.filters.OrderingFilter',
+    ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+        'rest_framework.renderers.BrowsableAPIRenderer',
+    ],
+    'DATETIME_FORMAT': '%Y-%m-%dT%H:%M:%S%z',
+    'DATE_FORMAT': '%Y-%m-%d',
+    'TIME_FORMAT': '%H:%M:%S',
+}
+
+# ============================================================================
+# JWT CONFIGURATION
+# ============================================================================
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': True,
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
+}
+
+# ============================================================================
+# CORS CONFIGURATION
+# ============================================================================
+
+CORS_ALLOWED_ORIGINS = [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://127.0.0.1:5173',
+    'http://127.0.0.1:5174',
+]
+
+CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
+# ============================================================================
+# API DOCUMENTATION (drf-spectacular)
+# ============================================================================
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Women Excel SACCO API',
+    'DESCRIPTION': 'REST API for Women Excel SACCO Management System',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SCHEMA_PATH_PREFIX': '/api/',
+}
+
+# Default primary key field type
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
