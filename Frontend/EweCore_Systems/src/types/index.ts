@@ -8,6 +8,7 @@ export type RequestType = 'leave' | 'expense' | 'petty-cash' | 'procurement' | '
 
 export interface User {
   id: string;
+  employeeNumber?: string; // Human-readable employee number (e.g., "WES-2024-001")
   name: string;
   email: string;
   role: UserRole;
@@ -52,6 +53,67 @@ export interface ApprovalRequest {
   priority: 'low' | 'medium' | 'high';
   amount?: number;
   data: any;
+}
+
+// Approval Groups (NEW)
+export interface ApprovalGroup {
+  id: string;
+  code: string;
+  name: string;
+  description?: string;
+  group_type: 'department' | 'role' | 'custom' | 'project';
+  department?: string;           // Department ID
+  department_name?: string;      // Department name (read-only)
+  member_count?: number;         // Number of members (read-only)
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApprovalGroupMembership {
+  id: string;
+  approval_group: string;         // Group ID
+  employee: string;               // Employee ID
+  employee_name?: string;         // Employee name (read-only)
+  employee_number?: string;       // Employee number (read-only)
+  department?: string;            // Employee department (read-only)
+  role: 'member' | 'lead' | 'admin';
+  joined_at: string;
+  is_active: boolean;
+}
+
+// Approval Workflow (Enhanced)
+export interface ApprovalWorkflow {
+  id: string;
+  workflow_name: string;
+  description?: string;
+  workflow_type: string;
+  stages: ApprovalWorkflowStage[];
+  applicable_groups?: string[];    // NEW: Array of ApprovalGroup IDs
+  conditions?: {                   // ENHANCED
+    approval_groups?: string[];    // NEW: Group codes
+    departments?: string[];
+    employee_roles?: string[];
+    priority?: string[];
+    min_amount?: number;
+    max_amount?: number;
+  };
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ApprovalWorkflowStage {
+  stage_number: number;
+  stage_name: string;
+  approver_type: 'position' | 'specific' | 'department_head' | 'role' | 'group'; // NEW: 'group'
+  approver_position?: string;
+  approver_employee_ids?: string[];
+  approver_group_id?: string;      // NEW FIELD for group approvers
+  approver_group_name?: string;    // NEW FIELD (read-only)
+  approval_logic: 'any' | 'all';
+  is_required: boolean;
+  auto_approve_conditions?: any;
 }
 
 // Leave Management - Re-export from leave-ledger module
@@ -121,6 +183,13 @@ export interface ExpenseItem {
   receiptUrl?: string;
 }
 
+export interface PettyCashLineItem {
+  description: string;
+  quantity: number;
+  unit_price: number;
+  amount: number;
+}
+
 export interface PettyCashRequest extends ApprovalRequest {
   data: {
     purpose: string;
@@ -129,6 +198,7 @@ export interface PettyCashRequest extends ApprovalRequest {
     expectedReturnDate: string;
     reconciled: boolean;
     receipts?: string[];
+    line_items?: PettyCashLineItem[];
   };
 }
 

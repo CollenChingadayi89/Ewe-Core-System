@@ -390,3 +390,119 @@ class EmployeeTax(BaseModel):
 
     def __str__(self):
         return f"Tax Info - {self.employee.get_full_name()}"
+
+
+class EmployeeDocument(BaseModel):
+    """
+    Employee Documents (IDs, Certificates, Contracts, etc.)
+    Stores uploaded files for each employee with metadata.
+    """
+
+    # Document Type Choices
+    class DocumentType(models.TextChoices):
+        NATIONAL_ID = 'national_id', 'National ID'
+        PASSPORT = 'passport', 'Passport'
+        BIRTH_CERTIFICATE = 'birth_certificate', 'Birth Certificate'
+        EDUCATION = 'education', 'Education Certificate'
+        PROFESSIONAL = 'professional', 'Professional Certificate'
+        CONTRACT = 'contract', 'Employment Contract'
+        OTHER = 'other', 'Other Document'
+
+    # Relationships
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name='documents',
+        verbose_name='Employee'
+    )
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='uploaded_employee_documents',
+        verbose_name='Uploaded By'
+    )
+
+    # Document Information
+    document_type = models.CharField(
+        max_length=30,
+        choices=DocumentType.choices,
+        verbose_name='Document Type'
+    )
+    file = models.FileField(
+        upload_to='employee_documents/%Y/%m/',
+        verbose_name='Document File',
+        help_text='Uploaded document file'
+    )
+    file_name = models.CharField(
+        max_length=255,
+        verbose_name='Original File Name'
+    )
+    file_size = models.BigIntegerField(
+        verbose_name='File Size (bytes)'
+    )
+    file_type = models.CharField(
+        max_length=50,
+        verbose_name='MIME Type',
+        help_text='e.g., application/pdf, image/jpeg'
+    )
+
+    # Document Details
+    title = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True,
+        verbose_name='Document Title',
+        help_text='Optional descriptive title'
+    )
+    notes = models.TextField(
+        blank=True,
+        null=True,
+        verbose_name='Notes'
+    )
+    expiry_date = models.DateField(
+        blank=True,
+        null=True,
+        verbose_name='Expiry Date',
+        help_text='For passports, work permits, licenses, etc.'
+    )
+
+    # Verification
+    is_verified = models.BooleanField(
+        default=False,
+        verbose_name='Is Verified',
+        help_text='Has this document been verified by HR?'
+    )
+    verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='verified_employee_documents',
+        verbose_name='Verified By'
+    )
+    verified_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        verbose_name='Verified At'
+    )
+
+    class Meta:
+        db_table = 'hr_employee_document'
+        verbose_name = 'Employee Document'
+        verbose_name_plural = 'Employee Documents'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['employee', 'document_type']),
+            models.Index(fields=['document_type', 'is_verified']),
+            models.Index(fields=['expiry_date']),
+        ]
+
+    def __str__(self):
+        return f"{self.employee.get_full_name()} - {self.get_document_type_display()}"
+
+    def is_expired(self):
+        """Check if document is expired"""
+        from django.utils import timezone
+        if self.expiry_date:
+            return self.expiry_date < timezone.now().date()
+        return False

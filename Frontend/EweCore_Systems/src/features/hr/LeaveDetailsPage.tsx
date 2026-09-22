@@ -53,10 +53,10 @@ import duration from 'dayjs/plugin/duration';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { PageHeader, StatusTag } from '../../components/common';
 import { useAuthStore } from '../../store/authStore';
-import { useLeaveStore } from '../../store/leaveStore';
 import type { LeaveRequest } from '../../types';
 import type { LeaveTransaction } from '../../types/leave-ledger';
 import { mockLeavePolicies } from '../../mock/leave-config';
+import employeeApi from '../../services/api/employeeApi';
 
 dayjs.extend(duration);
 dayjs.extend(relativeTime);
@@ -90,18 +90,9 @@ export const LeaveDetailsPage = () => {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
   const { user } = useAuthStore();
-  const {
-    allRequests,
-    loading,
-    fetchAllRequests,
-    fetchTransactionHistory,
-    approveRequest,
-    rejectRequest,
-    cancelRequest,
-    getLeavePolicy,
-  } = useLeaveStore();
 
-  // State
+  // Local state instead of Zustand
+  const [loading, setLoading] = useState(false);
   const [request, setRequest] = useState<LeaveRequest | null>(null);
   const [transactions, setTransactions] = useState<LeaveTransaction[]>([]);
   const [approvalModalVisible, setApprovalModalVisible] = useState(false);
@@ -113,10 +104,72 @@ export const LeaveDetailsPage = () => {
   const [rejectionForm] = Form.useForm();
   const [cancelForm] = Form.useForm();
 
+  // Fetch functions
+  const fetchRequest = async () => {
+    if (!id) return;
+    setLoading(true);
+    try {
+      const data = await employeeApi.leaveRequests.get(id);
+      setRequest(data);
+    } catch (error) {
+      console.error('Failed to fetch request:', error);
+      message.error('Failed to load leave request');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchTransactionHistory = async () => {
+    if (!id || !request) return;
+    try {
+      const response = await employeeApi.leaveTransactions.list({ leave_request: id });
+      setTransactions(response.results || []);
+    } catch (error) {
+      console.error('Failed to fetch transactions:', error);
+    }
+  };
+
+  const approveRequest = async (notes?: string) => {
+    if (!id) return;
+    try {
+      await employeeApi.leaveRequests.approve(id, notes);
+      message.success('Leave request approved successfully');
+      fetchRequest();
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || 'Failed to approve request');
+    }
+  };
+
+  const rejectRequest = async (notes: string) => {
+    if (!id) return;
+    try {
+      await employeeApi.leaveRequests.reject(id, notes);
+      message.success('Leave request rejected');
+      fetchRequest();
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || 'Failed to reject request');
+    }
+  };
+
+  const cancelRequest = async (reason: string) => {
+    if (!id) return;
+    try {
+      await employeeApi.leaveRequests.cancel(id, reason);
+      message.success('Leave request cancelled');
+      fetchRequest();
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || 'Failed to cancel request');
+    }
+  };
+
+  const getLeavePolicy = (policyId: string) => {
+    return mockLeavePolicies.find(p => p.id === policyId);
+  };
+
   // Load data
   useEffect(() => {
-    fetchAllRequests();
-  }, []);
+    fetchRequest();
+  }, [id]);
 
   useEffect(() => {
     if (id && allRequests.length > 0) {

@@ -12,8 +12,8 @@ import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { PageHeader, StatCard, StatusTag } from '../../components/common';
 import { useAuthStore } from '../../store/authStore';
-import { useLeaveStore } from '../../store/leaveStore';
 import type { LeaveRequest, LeaveType } from '../../types';
+import employeeApi from '../../services/api/employeeApi';
 
 const { TextArea } = Input;
 const { RangePicker } = DatePicker;
@@ -21,17 +21,44 @@ const { Text, Title } = Typography;
 
 export const MyLeavesPage = () => {
   const { user } = useAuthStore();
-  const { myRequests, myBalances, loading, fetchMyLeaves, submitRequest } = useLeaveStore();
+
+  // Local state instead of Zustand
+  const [myRequests, setMyRequests] = useState<LeaveRequest[]>([]);
+  const [myBalances, setMyBalances] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
   const [requestModalVisible, setRequestModalVisible] = useState(false);
   const [detailsModalVisible, setDetailsModalVisible] = useState(false);
   const [selectedLeave, setSelectedLeave] = useState<LeaveRequest | null>(null);
   const [form] = Form.useForm();
 
+  // Fetch functions
+  const fetchMyLeaves = async (userId: string) => {
+    setLoading(true);
+    try {
+      const response = await employeeApi.leaveRequests.list({ employee: userId });
+      setMyRequests(response.results || []);
+    } catch (error) {
+      console.error('Failed to fetch leaves:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitRequest = async (data: any) => {
+    try {
+      await employeeApi.leaveRequests.create(data);
+      message.success('Leave request submitted successfully');
+      if (user) fetchMyLeaves(user.id);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || 'Failed to submit request');
+    }
+  };
+
   useEffect(() => {
     if (user) {
       fetchMyLeaves(user.id);
     }
-  }, [user, fetchMyLeaves]);
+  }, [user]);
 
   // Calculate statistics
   const stats = {

@@ -47,11 +47,11 @@ import isBetween from 'dayjs/plugin/isBetween';
 import isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import { PageHeader, StatusTag } from '../../components/common';
-import { useLeaveStore } from '../../store/leaveStore';
 import { useAuthStore } from '../../store/authStore';
 import type { LeaveRequest } from '../../types';
 import { mockEmployees } from '../../mock/employees';
 import { mockDepartments } from '../../mock/employees';
+import employeeApi from '../../services/api/employeeApi';
 
 dayjs.extend(isBetween);
 dayjs.extend(isSameOrAfter);
@@ -94,7 +94,10 @@ interface CalendarLeaveEvent {
 
 export const LeaveCalendarPage = () => {
   const { user } = useAuthStore();
-  const { allRequests, loading, fetchAllRequests } = useLeaveStore();
+
+  // Local state instead of Zustand
+  const [allRequests, setAllRequests] = useState<LeaveRequest[]>([]);
+  const [loading, setLoading] = useState(false);
 
   // State
   const [selectedDate, setSelectedDate] = useState<Dayjs>(dayjs());
@@ -106,6 +109,19 @@ export const LeaveCalendarPage = () => {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [selectedDayLeaves, setSelectedDayLeaves] = useState<CalendarLeaveEvent[]>([]);
   const [selectedDay, setSelectedDay] = useState<Dayjs | null>(null);
+
+  // Fetch all leave requests
+  const fetchAllRequests = async () => {
+    setLoading(true);
+    try {
+      const response = await employeeApi.leaveRequests.list({ status: 'approved' });
+      setAllRequests(response.results || []);
+    } catch (error) {
+      console.error('Failed to fetch leave requests:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Load data
   useEffect(() => {

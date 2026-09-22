@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Button, Avatar, Space, Tag, Row, Col, Modal, Form, Input, Select, DatePicker, InputNumber, message, Drawer, Descriptions, Typography, Timeline } from 'antd';
 import {
   PlusOutlined,
@@ -16,8 +16,10 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { PageHeader, FilterBar, DataTable, StatusTag, StatCard } from '../../components/common';
 import type { Filter } from '../../components/common';
-import { mockAssets, assetCategories, assetStatuses, assetStats, assignableEmployees } from '../../mock/assets';
+import { assetCategories, assetStatuses, assignableEmployees } from '../../mock/assets';
 import type { Asset } from '../../mock/assets';
+import { useAssetStore } from '../../store/assetStore';
+import dayjs from 'dayjs';
 
 const { TextArea } = Input;
 const { Text } = Typography;
@@ -36,6 +38,79 @@ export const AssetManagerPage = () => {
   const [form] = Form.useForm();
   const [assignForm] = Form.useForm();
   const [returnForm] = Form.useForm();
+
+  // Get data from store
+  const {
+    assets: apiAssets,
+    statistics,
+    loading,
+    fetchAssets,
+    fetchStatistics,
+    createAsset,
+    updateAsset,
+    deleteAsset,
+    assignAsset,
+    returnAsset,
+  } = useAssetStore();
+
+  // Fetch data on mount
+  useEffect(() => {
+    fetchAssets();
+    fetchStatistics();
+  }, [fetchAssets, fetchStatistics]);
+
+  // Map API data to component format
+  const mapApiAssetToComponent = (apiData: any): Asset => {
+    const getDisplayStatus = (status: string): 'Active' | 'Inactive' | 'Under Maintenance' | 'Disposed' => {
+      if (status === 'active') return 'Active';
+      if (status === 'inactive') return 'Inactive';
+      if (status === 'under_maintenance') return 'Under Maintenance';
+      if (status === 'disposed') return 'Disposed';
+      return 'Active';
+    };
+
+    return {
+      id: apiData.asset_number || apiData.id,
+      name: apiData.name,
+      category: apiData.category,
+      make: apiData.manufacturer || '',
+      model: apiData.model || '',
+      quantity: apiData.quantity || 1,
+      purchaseDate: dayjs(apiData.purchase_date).format('YYYY-MM-DD'),
+      value: parseFloat(apiData.purchase_value) || 0,
+      assignedTo: apiData.assigned_to_name || 'Unassigned',
+      assignedToId: apiData.assigned_to || '',
+      assignedDepartment: apiData.assigned_department || '',
+      assignedPosition: apiData.assigned_position || '',
+      status: getDisplayStatus(apiData.status),
+      warranty: apiData.warranty_period || '',
+      warrantyEndDate: apiData.warranty_expiry ? dayjs(apiData.warranty_expiry).format('YYYY-MM-DD') : '',
+      serialNumber: apiData.serial_number,
+      location: apiData.location,
+      condition: apiData.condition,
+      description: apiData.description,
+      supplier: apiData.supplier,
+      depreciationRate: apiData.depreciation_rate,
+      currentValue: apiData.current_value ? parseFloat(apiData.current_value) : undefined,
+      lastMaintenanceDate: apiData.last_maintenance_date,
+      nextMaintenanceDate: apiData.next_maintenance_date,
+      disposalDate: apiData.disposal_date,
+      disposalReason: apiData.disposal_reason,
+      disposalValue: apiData.disposal_value ? parseFloat(apiData.disposal_value) : undefined,
+    };
+  };
+
+  const mockAssets = apiAssets.map(mapApiAssetToComponent);
+
+  // Calculate statistics with fallbacks
+  const assetStats = {
+    total: statistics?.total_assets || mockAssets.length,
+    active: statistics?.active || mockAssets.filter((a) => a.status === 'Active').length,
+    inactive: statistics?.inactive || mockAssets.filter((a) => a.status === 'Inactive').length,
+    underMaintenance: statistics?.under_maintenance || mockAssets.filter((a) => a.status === 'Under Maintenance').length,
+    totalValue: statistics?.total_value || mockAssets.reduce((sum, a) => sum + a.value, 0),
+    currentValue: statistics?.current_value || mockAssets.reduce((sum, a) => sum + (a.currentValue || a.value), 0),
+  };
 
   // Filter assets
   const filteredAssets = mockAssets.filter((asset) => {
@@ -116,37 +191,62 @@ export const AssetManagerPage = () => {
 
   // Handle add asset
   const handleAddAsset = async (values: any) => {
-    try {
-      console.log('New asset:', values);
-      message.success('Asset added successfully!');
+    const assetData = {
+      name: values.name,
+      category: values.category,
+      manufacturer: values.make,
+      model: values.model,
+      quantity: values.quantity || 1,
+      purchase_date: dayjs(values.purchaseDate).format('YYYY-MM-DD'),
+      purchase_value: values.value,
+      serial_number: values.serialNumber,
+      warranty_period: values.warranty,
+      supplier: values.supplier,
+      description: values.description,
+      location: values.location,
+      status: 'active',
+    };
+
+    const result = await createAsset(assetData);
+    if (result) {
       setAddAssetModalVisible(false);
       form.resetFields();
-    } catch (error) {
-      message.error('Failed to add asset');
     }
   };
 
   // Handle assign asset
   const handleAssignAsset = async (values: any) => {
-    try {
-      console.log('Assign asset:', values);
-      message.success('Asset assigned successfully!');
+    if (!selectedAsset?.id) return;
+
+    const assignData = {
+      assigned_to: values.assignedTo,
+      assigned_date: dayjs(values.assignDate).format('YYYY-MM-DD'),
+      notes: values.notes,
+    };
+
+    const result = await assignAsset(selectedAsset.id, assignData);
+    if (result) {
       setAssignModalVisible(false);
       assignForm.resetFields();
-    } catch (error) {
-      message.error('Failed to assign asset');
+      setSelectedAsset(null);
     }
   };
 
   // Handle return asset
   const handleReturnAsset = async (values: any) => {
-    try {
-      console.log('Return asset:', values);
-      message.success('Asset return request submitted for approval!');
+    if (!selectedAsset?.id) return;
+
+    const returnData = {
+      return_date: dayjs(values.returnDate).format('YYYY-MM-DD'),
+      condition: values.condition,
+      notes: values.notes,
+    };
+
+    const result = await returnAsset(selectedAsset.id, returnData);
+    if (result) {
       setReturnModalVisible(false);
       returnForm.resetFields();
-    } catch (error) {
-      message.error('Failed to submit return request');
+      setSelectedAsset(null);
     }
   };
 

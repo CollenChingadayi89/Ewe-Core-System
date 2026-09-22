@@ -30,9 +30,10 @@ export const PayablesPage = () => {
   const { user } = useAuthStore();
   const {
     payables,
-    clients,
+    vendors,
     loading,
     fetchPayables,
+    fetchVendors,
     submitPayable,
     approvePayable,
     rejectPayable,
@@ -55,7 +56,8 @@ export const PayablesPage = () => {
 
   useEffect(() => {
     fetchPayables();
-  }, [fetchPayables]);
+    fetchVendors();
+  }, [fetchPayables, fetchVendors]);
 
   // Get my payables (created by me)
   const myPayables = payables.filter(p => p.createdBy === user?.id);
@@ -92,14 +94,14 @@ export const PayablesPage = () => {
 
   const handleSubmitPayable = async (values: any) => {
     try {
-      const selectedClient = clients.find(c => c.id === values.clientId);
+      const selectedVendor = vendors.find(v => v.id === values.clientId);
 
       await submitPayable(user!.id, user!.name, {
         clientId: values.clientId,
-        clientName: selectedClient?.name || values.clientName,
-        contactPerson: selectedClient?.contact || values.contactPerson,
-        phone: selectedClient?.phone || values.phone,
-        email: selectedClient?.email || values.email,
+        clientName: selectedVendor?.companyName || values.clientName,
+        contactPerson: selectedVendor?.contactPerson || values.contactPerson,
+        phone: selectedVendor?.phone || values.phone,
+        email: selectedVendor?.email || values.email,
         invoiceNumber: values.invoiceNumber,
         invoiceDate: values.invoiceDate.format('DD/MM/YYYY'),
         amount: values.amount,
@@ -481,14 +483,14 @@ export const PayablesPage = () => {
                 rules={[{ required: true, message: 'Please select a client' }]}
               >
                 <Select
-                  placeholder="Select existing client"
+                  placeholder="Select existing vendor"
                   size="large"
                   showSearch
                   optionFilterProp="children"
                 >
-                  {clients.map(client => (
-                    <Select.Option key={client.id} value={client.id}>
-                      {client.name}
+                  {(vendors || []).map(vendor => (
+                    <Select.Option key={vendor.id} value={vendor.id}>
+                      {vendor.companyName}
                     </Select.Option>
                   ))}
                 </Select>

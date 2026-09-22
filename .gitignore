@@ -19,3 +19,37 @@ build/
 # OS specific files
 .DS_Store
 Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.manifest
+*.spec
+
+# Django
+*.log
+db.sqlite3
+db.sqlite3-journal
+/staticfiles/
+/media/
+
+# Virtual environments
+venv/
+venv_old/
+env/
+ENV/
+
+# Test and utility scripts
+Backend/test_*.py
+Backend/check_*.py
+Backend/create_*.py
+Backend/setup_*.py
+Backend/verify_*.py
+Backend/NUL
+nul

@@ -28,7 +28,8 @@ class PettyCash(BaseModel):
     amount = models.DecimalField(
         max_digits=12,
         decimal_places=2,
-        verbose_name='Amount (ZWG)'
+        verbose_name='Amount',
+        help_text='Total amount (auto-calculated from line items if present, or entered directly)'
     )
     currency = models.CharField(
         max_length=3,
@@ -37,6 +38,12 @@ class PettyCash(BaseModel):
         verbose_name='Currency'
     )
     purpose = models.TextField(verbose_name='Purpose')
+    line_items = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='Line Items',
+        help_text='Array of line items: [{"description": "Item", "quantity": 2, "unit_price": 100.00, "amount": 200.00}]'
+    )
     category = models.CharField(
         max_length=50,
         choices=[
@@ -49,6 +56,24 @@ class PettyCash(BaseModel):
         ],
         default='miscellaneous',
         verbose_name='Category'
+    )
+    justification = models.TextField(
+        blank=True,
+        null=True,
+        verbose_name='Justification',
+        help_text='Detailed justification for this petty cash request (required for amounts > 5000)'
+    )
+    receipt_expected = models.BooleanField(
+        default=True,
+        verbose_name='Receipt Expected',
+        help_text='Whether a receipt is required after disbursement'
+    )
+    account_code = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        verbose_name='Account/GL Code',
+        help_text='General Ledger account code for accounting purposes'
     )
 
     # Dates
@@ -66,7 +91,7 @@ class PettyCash(BaseModel):
             ('disbursed', 'Disbursed'),
             ('cancelled', 'Cancelled')
         ],
-        default='draft',
+        default='pending',
         verbose_name='Status'
     )
     priority = models.CharField(

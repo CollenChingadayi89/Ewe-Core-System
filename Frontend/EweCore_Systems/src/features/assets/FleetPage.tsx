@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Button, Avatar, Space, Tag, Row, Col, Card, Typography, Progress, Modal, Form, Input, Select, DatePicker, InputNumber, message, Drawer, Descriptions } from 'antd';
 import {
   PlusOutlined,
@@ -18,14 +18,13 @@ import type { ColumnsType } from 'antd/es/table';
 import { PageHeader, FilterBar, DataTable, StatusTag, StatCard } from '../../components/common';
 import type { Filter } from '../../components/common';
 import {
-  mockVehicles,
   vehicleTypes,
   vehicleStatuses,
   availableDrivers,
-  fleetStats,
-  mockServiceSchedule,
 } from '../../mock/fleet';
 import type { Vehicle, ServiceSchedule } from '../../mock/fleet';
+import { useVehicleStore } from '../../store/vehicleStore';
+import dayjs from 'dayjs';
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -43,6 +42,88 @@ export const FleetPage = () => {
   const [form] = Form.useForm();
   const [assignForm] = Form.useForm();
   const [serviceForm] = Form.useForm();
+
+  // Get data from store
+  const {
+    vehicles: apiVehicles,
+    loading,
+    fetchVehicles,
+    createVehicle,
+    updateVehicle,
+    deleteVehicle,
+  } = useVehicleStore();
+
+  // Fetch data on mount
+  useEffect(() => {
+    fetchVehicles();
+  }, [fetchVehicles]);
+
+  // Map API data to component format
+  const mapApiVehicleToComponent = (apiData: any): Vehicle => {
+    const getDisplayStatus = (status: string): 'Active' | 'In Service' | 'Under Maintenance' | 'Inactive' | 'Accident' => {
+      if (status === 'active') return 'Active';
+      if (status === 'in_service') return 'In Service';
+      if (status === 'under_maintenance') return 'Under Maintenance';
+      if (status === 'inactive') return 'Inactive';
+      if (status === 'accident') return 'Accident';
+      return 'Active';
+    };
+
+    return {
+      id: apiData.vehicle_number || apiData.id,
+      vehicleName: apiData.make + ' ' + apiData.model,
+      licensePlate: apiData.license_plate,
+      type: apiData.vehicle_type,
+      make: apiData.make,
+      model: apiData.model,
+      year: apiData.year,
+      status: getDisplayStatus(apiData.status),
+      assignedDriver: apiData.assigned_driver_name || 'Unassigned',
+      assignedDriverId: apiData.assigned_driver || 'UNASSIGNED',
+      mileage: apiData.current_mileage || 0,
+      fuelLevel: apiData.fuel_level || 0,
+      lastServiceDate: apiData.last_service_date || '',
+      nextServiceDate: apiData.next_service_date || '',
+      nextServiceMileage: apiData.next_service_mileage || 0,
+      purchaseDate: apiData.purchase_date || '',
+      purchaseValue: apiData.purchase_value ? parseFloat(apiData.purchase_value) : 0,
+      currentValue: apiData.current_value ? parseFloat(apiData.current_value) : 0,
+      insuranceProvider: apiData.insurance_provider,
+      insuranceExpiry: apiData.insurance_expiry,
+      licenseDiskExpiry: apiData.license_disk_expiry,
+      description: apiData.description,
+      color: apiData.color,
+      vin: apiData.vin,
+      engineNumber: apiData.engine_number,
+    };
+  };
+
+  const mockVehicles = apiVehicles.map(mapApiVehicleToComponent);
+
+  // Mock service schedule - would come from API in production
+  const mockServiceSchedule: ServiceSchedule[] = mockVehicles
+    .filter(v => v.nextServiceDate && dayjs(v.nextServiceDate).diff(dayjs(), 'days') <= 30)
+    .map(v => ({
+      id: v.id,
+      vehicleName: v.vehicleName,
+      licensePlate: v.licensePlate,
+      serviceType: 'Regular Maintenance',
+      scheduledDate: v.nextServiceDate,
+      estimatedCost: 15000,
+      status: 'Scheduled',
+    }));
+
+  // Calculate fleet stats with fallbacks
+  const fleetStats = {
+    totalVehicles: mockVehicles.length,
+    activeVehicles: mockVehicles.filter(v => v.status === 'Active' || v.status === 'In Service').length,
+    underMaintenance: mockVehicles.filter(v => v.status === 'Under Maintenance').length,
+    totalMileage: mockVehicles.reduce((sum, v) => sum + v.mileage, 0),
+    averageFuelLevel: mockVehicles.length > 0
+      ? mockVehicles.reduce((sum, v) => sum + v.fuelLevel, 0) / mockVehicles.length
+      : 0,
+    fuelCostThisMonth: 0, // Would come from API in production
+  };
 
   // Filter vehicles
   const filteredVehicles = mockVehicles.filter((vehicle) => {
@@ -110,35 +191,55 @@ export const FleetPage = () => {
   };
 
   const handleAddVehicle = async (values: any) => {
-    try {
-      console.log('New vehicle:', values);
-      message.success('Vehicle added successfully!');
+    const vehicleData = {
+      make: values.make,
+      model: values.model,
+      year: values.year,
+      license_plate: values.licensePlate,
+      vehicle_type: values.type,
+      vin: values.vin,
+      color: values.color,
+      purchase_date: dayjs(values.purchaseDate).format('YYYY-MM-DD'),
+      purchase_value: values.purchaseValue,
+      status: 'active',
+    };
+
+    const result = await createVehicle(vehicleData);
+    if (result) {
       setAddVehicleModalVisible(false);
       form.resetFields();
-    } catch (error) {
-      message.error('Failed to add vehicle');
     }
   };
 
   const handleAssignDriver = async (values: any) => {
-    try {
-      console.log('Assign driver:', values);
-      message.success('Driver assigned successfully!');
+    if (!selectedVehicle?.id) return;
+
+    const updateData = {
+      assigned_driver: values.driverId,
+      assigned_date: dayjs(values.assignDate).format('YYYY-MM-DD'),
+    };
+
+    const result = await updateVehicle(selectedVehicle.id, updateData);
+    if (result) {
       setAssignDriverModalVisible(false);
       assignForm.resetFields();
-    } catch (error) {
-      message.error('Failed to assign driver');
+      setSelectedVehicle(null);
     }
   };
 
   const handleScheduleService = async (values: any) => {
-    try {
-      console.log('Schedule service:', values);
-      message.success('Service scheduled successfully!');
+    if (!selectedVehicle?.id) return;
+
+    const updateData = {
+      next_service_date: dayjs(values.serviceDate).format('YYYY-MM-DD'),
+      next_service_mileage: values.serviceMileage,
+    };
+
+    const result = await updateVehicle(selectedVehicle.id, updateData);
+    if (result) {
       setScheduleServiceModalVisible(false);
       serviceForm.resetFields();
-    } catch (error) {
-      message.error('Failed to schedule service');
+      setSelectedVehicle(null);
     }
   };
 

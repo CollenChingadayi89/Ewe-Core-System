@@ -32,7 +32,7 @@ CRYPTOGRAPHY_KEY = os.environ.get('CRYPTOGRAPHY_KEY', 'vZ8vF3mK9qN2rT5wX7yB1cE4h
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.227,localhost').split(',')
 
 
 # Application definition
@@ -78,6 +78,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'Sacco_Project.middleware.RequestLoggingMiddleware',  # Request logging for debugging
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',  # CORS middleware (must be before CommonMiddleware)
@@ -443,7 +444,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 20,
+    'PAGE_SIZE': 50,  # Increased from 20 for better UX
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
         'rest_framework.filters.SearchFilter',
@@ -457,6 +458,7 @@ REST_FRAMEWORK = {
     'DATETIME_FORMAT': '%Y-%m-%dT%H:%M:%S%z',
     'DATE_FORMAT': '%Y-%m-%d',
     'TIME_FORMAT': '%H:%M:%S',
+    'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
 }
 
 # ============================================================================
@@ -487,6 +489,8 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:5174',
     'http://127.0.0.1:5173',
     'http://127.0.0.1:5174',
+    'http://192.168.1.227:5173',
+    'http://192.168.1.227:5174',
 ]
 
 CORS_ALLOW_CREDENTIALS = True

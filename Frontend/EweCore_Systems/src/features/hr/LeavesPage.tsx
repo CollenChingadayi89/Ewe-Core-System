@@ -1,14 +1,15 @@
 /**
- * Leave Management Page - Enhanced with Ledger-based System
+ * Leave Management Page - Configuration-Driven Dynamic Form
  *
  * Features:
- * - Tabbed interface (All Requests, My Requests, Pending My Approval)
- * - Leave balance cards with real-time updates
- * - Comprehensive filtering and search
- * - Create leave request with validation
- * - Approve/reject workflow
- * - View transaction history
- * - Integration with ledger-based stores
+ * - NO Zustand - Direct API integration
+ * - Dynamic form based on leave policy configuration
+ * - Gender validation (men can't apply maternity, women can't apply paternity)
+ * - Conditional document upload (required vs optional based on policy)
+ * - Real-time balance display when leave type selected
+ * - Real-time working days calculation
+ * - Minimum notice validation
+ * - Tabbed interface (All, My Requests, Pending Approval)
  */
 
 import { useState, useEffect } from 'react';
@@ -28,46 +29,92 @@ import {
   message,
   Alert,
   Tooltip,
-  Divider,
   Progress,
-  Drawer,
-  Timeline,
   Upload,
-  Badge,
+  Spin,
+  Typography,
+  Checkbox,
+  Statistic,
 } from 'antd';
 import {
   PlusOutlined,
   CheckOutlined,
   CloseOutlined,
   CalendarOutlined,
-  ClockCircleOutlined,
   FileTextOutlined,
   EyeOutlined,
-  SettingOutlined,
-  HistoryOutlined,
-  ExclamationCircleOutlined,
   UploadOutlined,
   InfoCircleOutlined,
+  ExclamationCircleOutlined,
+  ClockCircleOutlined,
 } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
+import type { UploadFile } from 'antd/es/upload/interface';
 import dayjs, { type Dayjs } from 'dayjs';
-import { PageHeader, StatCard, StatusTag, DataTable, FilterBar } from '../../components/common';
-import type { Filter } from '../../components/common';
+import { PageHeader, StatCard, StatusTag, DataTable } from '../../components/common';
 import { useAuthStore } from '../../store/authStore';
-import { useLeaveStore } from '../../store/leaveStore';
-import type { LeaveRequest } from '../../types';
-import type { LeaveBalance, LeaveTransaction, LeaveTypeName } from '../../types/leave-ledger';
-import { calculateWorkingDays } from '../../mock/public-holidays';
-import { mockLeavePolicies } from '../../mock/leave-config';
+import employeeApi from '../../services/api/employeeApi';
 
 const { TextArea } = Input;
 const { RangePicker } = DatePicker;
-const { TabPane } = Tabs;
+const { Title, Text } = Typography;
 
-/**
- * Leave type color mapping for consistent UI
- */
+// ============================================================================
+// INTERFACES
+// ============================================================================
+
+interface LeavePolicy {
+  id: string;
+  code: string;
+  leave_type: string;
+  display_name: string;
+  description: string;
+  is_statutory: boolean;
+  is_paid: boolean;
+  annual_entitlement_days: number;
+  gender_restriction: 'male' | 'female' | 'none';
+  requires_documentation: boolean;
+  documentation_types: string[];
+  documentation_mandatory: boolean;
+  minimum_notice_days: number;
+  counts_weekends_in_leave: boolean;
+  counts_public_holidays_in_leave: boolean;
+  supports_half_days: boolean;
+  is_active: boolean;
+}
+
+interface LeaveRequest {
+  id: string;
+  request_number: string;
+  employee: string;
+  employee_name: string;
+  employee_number: string;
+  leave_policy: string;
+  leave_type: string;
+  leave_type_name: string;
+  start_date: string;
+  end_date: string;
+  total_days: number;
+  working_days_count: number;
+  is_half_day: boolean;
+  reason: string;
+  status: string;
+  priority: string;
+  is_emergency_leave: boolean;
+  created_at: string;
+}
+
+interface LeaveBalance {
+  total_accrued: number;
+  total_used: number;
+  total_pending: number;
+  available_balance: number;
+}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
 const LEAVE_TYPE_COLORS: Record<string, string> = {
   annual: '#00d084',
   sick: '#ff6900',
@@ -78,9 +125,6 @@ const LEAVE_TYPE_COLORS: Record<string, string> = {
   unpaid: '#8c8c8c',
 };
 
-/**
- * Leave type icons
- */
 const LEAVE_TYPE_ICONS: Record<string, string> = {
   annual: '🏖️',
   sick: '🤒',
@@ -91,354 +135,414 @@ const LEAVE_TYPE_ICONS: Record<string, string> = {
   unpaid: '💼',
 };
 
+const SPECIAL_LEAVE_TRIGGERS = [
+  { value: 'bereavement', label: 'Bereavement (Death of family member)' },
+  { value: 'wedding', label: 'Wedding (Own or immediate family)' },
+  { value: 'court-witness', label: 'Court Witness / Jury Duty' },
+  { value: 'military-service', label: 'Military Service' },
+  { value: 'relocation', label: 'Relocation / Moving' },
+  { value: 'other', label: 'Other (specify in reason)' },
+];
+
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
+
 export const LeavesPage = () => {
-  const navigate = useNavigate();
   const { user } = useAuthStore();
-  const {
-    allRequests,
-    myRequests,
-    pendingMyApproval,
-    myBalances,
-    loading,
-    fetchAllRequests,
-    fetchMyLeaves,
-    fetchPendingApprovals,
-    fetchLeaveBalance,
-    fetchTransactionHistory,
-    submitRequest,
-    approveRequest,
-    rejectRequest,
-    cancelRequest,
-    validateLeaveRequest,
-    getLeavePolicy,
-  } = useLeaveStore();
-
-  // State
-  const [activeTab, setActiveTab] = useState('all');
-  const [searchTerm, setSearchTerm] = useState('');
-  const [leaveTypeFilter, setLeaveTypeFilter] = useState<string | undefined>(undefined);
-  const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
-  const [dateRange, setDateRange] = useState<any>(undefined);
-
-  // Modals
-  const [requestModalVisible, setRequestModalVisible] = useState(false);
-  const [approvalModalVisible, setApprovalModalVisible] = useState(false);
-  const [rejectionModalVisible, setRejectionModalVisible] = useState(false);
-  const [balanceDrawerVisible, setBalanceDrawerVisible] = useState(false);
-  const [transactionDrawerVisible, setTransactionDrawerVisible] = useState(false);
-
-  // Selected items
-  const [selectedRequest, setSelectedRequest] = useState<LeaveRequest | null>(null);
-  const [selectedLeaveType, setSelectedLeaveType] = useState<string>('annual');
-  const [transactionHistory, setTransactionHistory] = useState<LeaveTransaction[]>([]);
-
-  // Forms
   const [form] = Form.useForm();
-  const [approvalForm] = Form.useForm();
-  const [rejectionForm] = Form.useForm();
 
-  // Form state for real-time validation
-  const [formLeaveType, setFormLeaveType] = useState<string | undefined>(undefined);
-  const [formDateRange, setFormDateRange] = useState<[Dayjs, Dayjs] | null>(null);
-  const [validationErrors, setValidationErrors] = useState<string[]>([]);
-  const [validationWarnings, setValidationWarnings] = useState<string[]>([]);
-  const [calculatedDays, setCalculatedDays] = useState<number>(0);
+  // ============================================================================
+  // STATE - Data (No Zustand!)
+  // ============================================================================
 
-  // Load data on mount
-  useEffect(() => {
-    fetchAllRequests();
-    if (user?.id) {
-      fetchMyLeaves(user.id);
-      fetchPendingApprovals(user.id);
-    }
-  }, [user?.id]);
+  const [policies, setPolicies] = useState<LeavePolicy[]>([]);
+  const [policiesLoading, setPoliciesLoading] = useState(false);
 
-  // Calculate statistics
-  const totalRequests = allRequests.length;
-  const pendingCount = allRequests.filter((r) => r.status === 'pending').length;
-  const approvedCount = allRequests.filter((r) => r.status === 'approved').length;
-  const rejectedCount = allRequests.filter((r) => r.status === 'rejected').length;
+  const [allRequests, setAllRequests] = useState<LeaveRequest[]>([]);
+  const [myRequests, setMyRequests] = useState<LeaveRequest[]>([]);
+  const [pendingApproval, setPendingApproval] = useState<LeaveRequest[]>([]);
+  const [requestsLoading, setRequestsLoading] = useState(false);
 
-  // Get current data based on active tab
-  const getCurrentData = () => {
-    switch (activeTab) {
-      case 'my-requests':
-        return myRequests;
-      case 'pending-approval':
-        return pendingMyApproval;
-      default:
-        return allRequests;
+  // ============================================================================
+  // STATE - UI
+  // ============================================================================
+
+  const [activeTab, setActiveTab] = useState('my-requests');
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isDetailsDrawerOpen, setIsDetailsDrawerOpen] = useState(false);
+  const [selectedRequest, setSelectedRequest] = useState<LeaveRequest | null>(null);
+
+  // My Balances modal
+  const [isBalancesModalOpen, setIsBalancesModalOpen] = useState(false);
+  const [myBalances, setMyBalances] = useState<any[]>([]);
+  const [myBalancesLoading, setMyBalancesLoading] = useState(false);
+
+  // ============================================================================
+  // STATE - Dynamic Form
+  // ============================================================================
+
+  const [selectedPolicy, setSelectedPolicy] = useState<LeavePolicy | null>(null);
+  const [genderError, setGenderError] = useState<string | null>(null);
+  const [balance, setBalance] = useState<LeaveBalance | null>(null);
+  const [balanceLoading, setBalanceLoading] = useState(false);
+  const [calculatedDays, setCalculatedDays] = useState<any>(null);
+  const [calculatingDays, setCalculatingDays] = useState(false);
+  const [fileList, setFileList] = useState<UploadFile[]>([]);
+
+  // ============================================================================
+  // FETCH DATA
+  // ============================================================================
+
+  const fetchPolicies = async () => {
+    setPoliciesLoading(true);
+    try {
+      const response = await employeeApi.leavePolicies.list({ is_active: true, page_size: 100 });
+      setPolicies(response.results || []);
+    } catch (error) {
+      console.error('Failed to fetch leave policies:', error);
+      message.error('Failed to load leave types');
+    } finally {
+      setPoliciesLoading(false);
     }
   };
 
-  // Filter requests
-  const filteredRequests = getCurrentData().filter((request) => {
-    const matchesSearch =
-      request.requestorName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      request.id.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesLeaveType = !leaveTypeFilter || request.data.leaveType === leaveTypeFilter;
-    const matchesStatus = !statusFilter || request.status === statusFilter;
+  const fetchLeaveRequests = async () => {
+    if (!user?.id) return;
 
-    return matchesSearch && matchesLeaveType && matchesStatus;
-  });
-
-  // Real-time form validation
-  useEffect(() => {
-    if (formLeaveType && formDateRange && user?.id) {
-      const [start, end] = formDateRange;
-      const validation = validateLeaveRequest(
-        user.id,
-        formLeaveType,
-        start.format('YYYY-MM-DD'),
-        end.format('YYYY-MM-DD')
-      );
-      setValidationErrors(validation.errors);
-      setValidationWarnings(validation.warnings);
-      setCalculatedDays(validation.calculatedWorkingDays || 0);
-    } else {
-      setValidationErrors([]);
-      setValidationWarnings([]);
-      setCalculatedDays(0);
-    }
-  }, [formLeaveType, formDateRange, user?.id]);
-
-  // Handle leave request submission
-  const handleSubmitLeaveRequest = async (values: any) => {
+    setRequestsLoading(true);
     try {
-      if (!user?.id || !user?.name) {
-        message.error('User information not available');
+      // Fetch all requests (HR/managers see all, employees see their own)
+      const allResponse = await employeeApi.leaveRequests.list({ page_size: 1000 });
+      setAllRequests(allResponse.results || []);
+
+      // Filter my requests
+      const myReqs = (allResponse.results || []).filter((req: LeaveRequest) => req.employee === user.id);
+      setMyRequests(myReqs);
+
+      // Fetch pending approvals (requests where I'm the approver)
+      const pendingResponse = await employeeApi.leaveRequests.list({
+        status: 'pending',
+        page_size: 1000
+      });
+      setPendingApproval(pendingResponse.results || []);
+    } catch (error) {
+      console.error('Failed to fetch leave requests:', error);
+      message.error('Failed to load leave requests');
+    } finally {
+      setRequestsLoading(false);
+    }
+  };
+
+  const fetchBalance = async (policyId: string) => {
+    if (!user?.id || !policyId) return;
+
+    setBalanceLoading(true);
+    try {
+      const balanceData = await employeeApi.leaveBalance.get({
+        employee: user.id,
+        leave_policy: policyId,
+      });
+      setBalance(balanceData);
+    } catch (error) {
+      console.error('Failed to fetch balance:', error);
+      setBalance(null);
+    } finally {
+      setBalanceLoading(false);
+    }
+  };
+
+  const calculateWorkingDays = async (startDate: string, endDate: string, policyId: string) => {
+    setCalculatingDays(true);
+    try {
+      const result = await employeeApi.leaveRequests.calculateDays({
+        start_date: startDate,
+        end_date: endDate,
+        leave_policy_id: policyId,
+        is_half_day: form.getFieldValue('is_half_day') || false,
+      });
+      setCalculatedDays(result);
+    } catch (error) {
+      console.error('Failed to calculate working days:', error);
+      setCalculatedDays(null);
+    } finally {
+      setCalculatingDays(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPolicies();
+    fetchLeaveRequests();
+  }, [user]);
+
+  // ============================================================================
+  // HANDLERS - Policy Selection (Dynamic Form)
+  // ============================================================================
+
+  const handlePolicyChange = (policyId: string) => {
+    const policy = policies.find(p => p.id === policyId);
+    setSelectedPolicy(policy || null);
+
+    // Clear previous state
+    setGenderError(null);
+    setBalance(null);
+    setCalculatedDays(null);
+    setFileList([]);
+
+    if (!policy) return;
+
+    // Check gender restriction
+    if (policy.gender_restriction !== 'none' && user) {
+      if (policy.gender_restriction === 'female' && user.gender === 'male') {
+        setGenderError(`${policy.display_name} is only available to female employees`);
+      } else if (policy.gender_restriction === 'male' && user.gender === 'female') {
+        setGenderError(`${policy.display_name} is only available to male employees`);
+      }
+    }
+
+    // Fetch balance for this leave type
+    fetchBalance(policyId);
+  };
+
+  const handleDateRangeChange = (dates: [Dayjs | null, Dayjs | null] | null) => {
+    if (!dates || !dates[0] || !dates[1] || !selectedPolicy) {
+      setCalculatedDays(null);
+      return;
+    }
+
+    calculateWorkingDays(
+      dates[0].format('YYYY-MM-DD'),
+      dates[1].format('YYYY-MM-DD'),
+      selectedPolicy.id
+    );
+  };
+
+  // ============================================================================
+  // HANDLERS - My Balances
+  // ============================================================================
+
+  const handleShowMyBalances = async () => {
+    if (!user?.id) {
+      message.error('User information not available');
+      return;
+    }
+
+    setIsBalancesModalOpen(true);
+    setMyBalancesLoading(true);
+
+    try {
+      const balances: any[] = [];
+
+      // Fetch balances for logged-in user for all leave policies
+      for (const policy of policies) {
+        try {
+          const balanceData = await employeeApi.leaveBalance.get({
+            employee: user.id,
+            leave_policy: policy.id,
+          });
+
+          // Only include policies with some balance activity
+          if (balanceData.total_accrued > 0 || balanceData.total_used > 0) {
+            balances.push({
+              policy_id: policy.id,
+              policy_name: policy.display_name,
+              leave_type: policy.leave_type,
+              total_accrued: balanceData.total_accrued,
+              total_used: balanceData.total_used,
+              total_pending: balanceData.total_pending,
+              available_balance: balanceData.available_balance,
+            });
+          }
+        } catch (policyError: any) {
+          // Skip policies that fail (e.g., employee has no balance for this policy)
+          console.warn(`Failed to fetch balance for policy ${policy.display_name}:`, policyError?.response?.data || policyError.message);
+        }
+      }
+
+      setMyBalances(balances);
+    } catch (error) {
+      console.error('Failed to fetch my balances:', error);
+      message.error('Failed to load your leave balances');
+    } finally {
+      setMyBalancesLoading(false);
+    }
+  };
+
+  // ============================================================================
+  // HANDLERS - Create Leave Request
+  // ============================================================================
+
+  const handleCreateLeave = () => {
+    form.resetFields();
+    setSelectedPolicy(null);
+    setGenderError(null);
+    setBalance(null);
+    setCalculatedDays(null);
+    setFileList([]);
+    setIsCreateModalOpen(true);
+  };
+
+  const handleSubmitLeaveRequest = async (values: any) => {
+    if (genderError) {
+      message.error(genderError);
+      return;
+    }
+
+    if (!selectedPolicy) {
+      message.error('Please select a leave type');
+      return;
+    }
+
+    // Check if documentation is required and provided
+    if (selectedPolicy.requires_documentation && selectedPolicy.documentation_mandatory) {
+      if (fileList.length === 0) {
+        message.error(`Please upload required documents: ${selectedPolicy.documentation_types?.join(', ')}`);
         return;
       }
+    }
 
+    try {
       const [startDate, endDate] = values.dateRange;
 
-      await submitRequest(user.id, user.name, {
-        leaveType: values.leaveType,
-        startDate: startDate.format('YYYY-MM-DD'),
-        endDate: endDate.format('YYYY-MM-DD'),
+      const requestData = {
+        employee: user?.id,
+        leave_policy: selectedPolicy.id,
+        start_date: startDate.format('YYYY-MM-DD'),
+        end_date: endDate.format('YYYY-MM-DD'),
+        is_half_day: values.is_half_day || false,
         reason: values.reason,
-        handoverNotes: values.handoverNotes,
-        attachments: values.attachments?.fileList?.map((file: any) => file.name),
-        isEmergencyLeave: values.isEmergency || false,
-        specialLeaveTrigger: values.specialLeaveTrigger,
-      });
+        handover_notes: values.handover_notes,
+        address_during_leave: values.address_during_leave,
+        contact_during_leave: values.contact_during_leave,
+        special_leave_trigger: values.special_leave_trigger,
+        is_emergency_leave: values.is_emergency_leave || false,
+        documentation_provided: fileList.length > 0,
+        attachments: fileList.map(f => f.name), // In production, upload files first
+        priority: values.priority || 'medium',
+      };
 
-      message.success('Leave request submitted successfully!');
-      setRequestModalVisible(false);
+      await employeeApi.leaveRequests.create(requestData);
+      message.success('Leave request submitted successfully! Pending approval.');
+      setIsCreateModalOpen(false);
       form.resetFields();
-      setFormLeaveType(undefined);
-      setFormDateRange(null);
-
-      // Refresh data
-      fetchMyLeaves(user.id);
-      fetchAllRequests();
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : 'Failed to submit leave request');
+      fetchLeaveRequests();
+    } catch (error: any) {
+      console.error('Failed to create leave request:', error);
+      const errorMsg = error.response?.data?.leave_policy?.[0] ||
+                      error.response?.data?.message ||
+                      'Failed to submit leave request';
+      message.error(errorMsg);
     }
   };
 
-  // Handle approve
-  const handleApprove = async () => {
+  // ============================================================================
+  // HANDLERS - Approve/Reject
+  // ============================================================================
+
+  const handleApprove = async (request: LeaveRequest) => {
     try {
-      const values = await approvalForm.validateFields();
-      if (!selectedRequest || !user?.id) return;
-
-      await approveRequest({
-        requestId: selectedRequest.id,
-        approverId: user.id,
-        comment: values.comment,
-      });
-
-      message.success('Leave request approved successfully');
-      setApprovalModalVisible(false);
-      approvalForm.resetFields();
-      setSelectedRequest(null);
-
-      // Refresh data
-      fetchAllRequests();
-      if (user.id) {
-        fetchPendingApprovals(user.id);
-      }
+      await employeeApi.leaveRequests.approve(request.id, 'Approved');
+      message.success('Leave request approved');
+      fetchLeaveRequests();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : 'Failed to approve request');
+      console.error('Failed to approve:', error);
+      message.error('Failed to approve leave request');
     }
   };
 
-  // Handle reject
-  const handleReject = async () => {
-    try {
-      const values = await rejectionForm.validateFields();
-      if (!selectedRequest || !user?.id) return;
+  const handleReject = async (request: LeaveRequest) => {
+    Modal.confirm({
+      title: 'Reject Leave Request',
+      content: (
+        <div>
+          <p>Are you sure you want to reject this leave request?</p>
+          <Input.TextArea
+            placeholder="Reason for rejection (required)"
+            id="reject-reason"
+          />
+        </div>
+      ),
+      onOk: async () => {
+        const reason = (document.getElementById('reject-reason') as HTMLTextAreaElement)?.value;
+        if (!reason) {
+          message.error('Please provide a reason for rejection');
+          return;
+        }
+        try {
+          await employeeApi.leaveRequests.reject(request.id, reason);
+          message.success('Leave request rejected');
+          fetchLeaveRequests();
+        } catch (error) {
+          console.error('Failed to reject:', error);
+          message.error('Failed to reject leave request');
+        }
+      },
+    });
+  };
 
-      await rejectRequest({
-        requestId: selectedRequest.id,
-        approverId: user.id,
-        comment: values.comment,
-      });
+  // ============================================================================
+  // VALIDATION - Minimum Notice
+  // ============================================================================
 
-      message.success('Leave request rejected');
-      setRejectionModalVisible(false);
-      rejectionForm.resetFields();
-      setSelectedRequest(null);
+  const validateMinimumNotice = () => {
+    if (!selectedPolicy || !form.getFieldValue('dateRange')) return null;
 
-      // Refresh data
-      fetchAllRequests();
-      if (user.id) {
-        fetchPendingApprovals(user.id);
-      }
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : 'Failed to reject request');
+    const dateRange = form.getFieldValue('dateRange');
+    const isEmergency = form.getFieldValue('is_emergency_leave');
+
+    if (!dateRange || !dateRange[0] || isEmergency) return null;
+
+    const daysUntilLeave = dateRange[0].diff(dayjs(), 'days');
+
+    if (daysUntilLeave < selectedPolicy.minimum_notice_days) {
+      return {
+        type: 'warning',
+        message: `Minimum ${selectedPolicy.minimum_notice_days} days notice required. You provided ${daysUntilLeave} days notice.`,
+      };
     }
+
+    return null;
   };
 
-  // Handle view details
-  const handleViewDetails = (id: string) => {
-    navigate(`/hr/leaves/${id}`);
-  };
+  // ============================================================================
+  // TABLE COLUMNS
+  // ============================================================================
 
-  // Handle view balance
-  const handleViewBalance = (leaveType: string) => {
-    setSelectedLeaveType(leaveType);
-    setBalanceDrawerVisible(true);
-  };
-
-  // Handle view transaction history
-  const handleViewTransactions = (leaveType: string) => {
-    if (!user?.id) return;
-    const transactions = fetchTransactionHistory(user.id, leaveType);
-    setTransactionHistory(transactions);
-    setSelectedLeaveType(leaveType);
-    setTransactionDrawerVisible(true);
-  };
-
-  // Filters configuration
-  const filters: Filter[] = [
-    {
-      type: 'search',
-      placeholder: 'Search by employee or request ID...',
-      onChange: setSearchTerm,
-      value: searchTerm,
-      width: 280,
-    },
-    {
-      type: 'select',
-      label: 'Leave Type',
-      placeholder: 'All Types',
-      onChange: setLeaveTypeFilter,
-      value: leaveTypeFilter,
-      width: 160,
-      options: mockLeavePolicies
-        .filter((p) => p.isActive)
-        .map((p) => ({
-          label: p.displayName,
-          value: p.leaveType,
-        })),
-    },
-    {
-      type: 'select',
-      label: 'Status',
-      placeholder: 'All Statuses',
-      onChange: setStatusFilter,
-      value: statusFilter,
-      width: 160,
-      options: [
-        { label: 'Draft', value: 'draft' },
-        { label: 'Pending', value: 'pending' },
-        { label: 'Approved', value: 'approved' },
-        { label: 'Rejected', value: 'rejected' },
-        { label: 'Cancelled', value: 'cancelled' },
-      ],
-    },
-    {
-      type: 'dateRange',
-      label: 'Date Range',
-      onChange: setDateRange,
-      value: dateRange,
-      width: 280,
-    },
-  ];
-
-  const handleReset = () => {
-    setSearchTerm('');
-    setLeaveTypeFilter(undefined);
-    setStatusFilter(undefined);
-    setDateRange(undefined);
-  };
-
-  // Table columns
   const columns: ColumnsType<LeaveRequest> = [
     {
-      title: 'Request ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 140,
-      render: (id: string) => (
-        <span style={{ fontWeight: 600, color: '#0693e3', fontFamily: 'monospace' }}>
-          {id}
-        </span>
-      ),
+      title: 'Request #',
+      dataIndex: 'request_number',
+      key: 'request_number',
+      width: 150,
+      render: (text) => <Text strong>{text}</Text>,
     },
     {
       title: 'Employee',
-      dataIndex: 'requestorName',
-      key: 'requestorName',
-      width: 180,
-      render: (name: string, record: LeaveRequest) => (
+      key: 'employee',
+      render: (_, record) => (
         <div>
-          <div style={{ fontWeight: 500, color: '#32373c' }}>{name}</div>
-          <div style={{ fontSize: '11px', color: '#8c8c8c', marginTop: '2px' }}>
-            {record.submittedDate
-              ? dayjs(record.submittedDate).format('DD/MM/YYYY HH:mm')
-              : 'Not submitted'}
-          </div>
+          <div><Text strong>{record.employee_name}</Text></div>
+          <div><Text type="secondary" style={{ fontSize: '12px' }}>{record.employee_number}</Text></div>
         </div>
       ),
     },
     {
       title: 'Leave Type',
-      key: 'leaveType',
-      width: 150,
-      render: (_: any, record: LeaveRequest) => (
-        <Tag
-          color={LEAVE_TYPE_COLORS[record.data.leaveType] || 'default'}
-          style={{ borderRadius: '4px', fontWeight: 500 }}
-        >
-          {LEAVE_TYPE_ICONS[record.data.leaveType]} {record.data.leaveType.toUpperCase()}
+      dataIndex: 'leave_type',
+      key: 'leave_type',
+      render: (type, record) => (
+        <Tag color={LEAVE_TYPE_COLORS[type] || 'default'}>
+          {LEAVE_TYPE_ICONS[type]} {record.leave_type_name}
         </Tag>
       ),
     },
     {
-      title: 'Duration',
-      key: 'duration',
-      width: 200,
-      render: (_: any, record: LeaveRequest) => (
+      title: 'Period',
+      key: 'period',
+      render: (_, record) => (
         <div>
-          <div style={{ fontSize: '13px', color: '#595959' }}>
-            {dayjs(record.data.startDate).format('DD/MM/YYYY')} →{' '}
-            {dayjs(record.data.endDate).format('DD/MM/YYYY')}
-          </div>
-          <div style={{ fontSize: '11px', color: '#8c8c8c', marginTop: '2px' }}>
-            <strong>{record.data.days}</strong> days{' '}
-            {record.data.workingDaysCount && record.data.workingDaysCount !== record.data.days && (
-              <span>({record.data.workingDaysCount} working)</span>
-            )}
-          </div>
-        </div>
-      ),
-    },
-    {
-      title: 'Balance Impact',
-      key: 'balance',
-      width: 140,
-      align: 'right',
-      render: (_: any, record: LeaveRequest) => (
-        <div>
-          <div style={{ fontSize: '12px', color: '#8c8c8c' }}>
-            Before: <strong>{record.data.balanceBeforeRequest || '-'}</strong>
-          </div>
-          <div style={{ fontSize: '12px', color: '#8c8c8c' }}>
-            After: <strong>{record.data.balanceAfterRequest || '-'}</strong>
-          </div>
+          <div><CalendarOutlined /> {dayjs(record.start_date).format('DD/MM/YYYY')} - {dayjs(record.end_date).format('DD/MM/YYYY')}</div>
+          <div><Text type="secondary" style={{ fontSize: '12px' }}>{record.working_days_count} working days</Text></div>
         </div>
       ),
     },
@@ -446,659 +550,545 @@ export const LeavesPage = () => {
       title: 'Status',
       dataIndex: 'status',
       key: 'status',
-      width: 120,
-      render: (status: string, record: LeaveRequest) => (
-        <Tooltip
-          title={
-            record.approvalChain?.length > 0
-              ? `Approval Chain: ${record.approvalChain.map((s) => s.approverName).join(' → ')}`
-              : undefined
-          }
-        >
-          <StatusTag status={status} />
-        </Tooltip>
-      ),
-    },
-    {
-      title: 'Priority',
-      dataIndex: 'priority',
-      key: 'priority',
-      width: 100,
-      render: (priority: string) => {
-        const colors: Record<string, string> = {
-          low: 'blue',
-          medium: 'orange',
-          high: 'red',
-        };
-        return <Tag color={colors[priority] || 'default'}>{priority.toUpperCase()}</Tag>;
-      },
+      render: (status) => <StatusTag status={status} />,
     },
     {
       title: 'Actions',
       key: 'actions',
-      width: 200,
-      align: 'center',
-      fixed: 'right',
-      render: (_: any, record: LeaveRequest) => (
-        <Space size="small">
-          <Tooltip title="View Details">
-            <Button
-              type="link"
-              size="small"
-              icon={<EyeOutlined />}
-              onClick={() => handleViewDetails(record.id)}
-            />
-          </Tooltip>
-          {record.status === 'pending' && record.currentApproverId === user?.id && (
+      width: 150,
+      render: (_, record) => (
+        <Space>
+          {record.status === 'pending' && activeTab === 'pending-approval' && (
             <>
-              <Button
-                type="primary"
-                size="small"
-                icon={<CheckOutlined />}
-                onClick={() => {
-                  setSelectedRequest(record);
-                  setApprovalModalVisible(true);
-                }}
-                style={{
-                  background: 'linear-gradient(135deg, #00d084 0%, #00BFA5 100%)',
-                  border: 'none',
-                  borderRadius: '6px',
-                }}
-              >
-                Approve
-              </Button>
-              <Button
-                danger
-                size="small"
-                icon={<CloseOutlined />}
-                onClick={() => {
-                  setSelectedRequest(record);
-                  setRejectionModalVisible(true);
-                }}
-                style={{ borderRadius: '6px' }}
-              >
-                Reject
-              </Button>
+              <Tooltip title="Approve">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<CheckOutlined />}
+                  style={{ color: '#00d084' }}
+                  onClick={() => handleApprove(record)}
+                />
+              </Tooltip>
+              <Tooltip title="Reject">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<CloseOutlined />}
+                  danger
+                  onClick={() => handleReject(record)}
+                />
+              </Tooltip>
             </>
           )}
+          <Tooltip title="View Details">
+            <Button
+              type="text"
+              size="small"
+              icon={<EyeOutlined />}
+              onClick={() => {
+                setSelectedRequest(record);
+                setIsDetailsDrawerOpen(true);
+              }}
+            />
+          </Tooltip>
         </Space>
       ),
     },
   ];
 
+  // ============================================================================
+  // STATISTICS
+  // ============================================================================
+
+  const totalRequests = myRequests.length;
+  const pendingRequests = myRequests.filter(r => r.status === 'pending').length;
+  const approvedRequests = myRequests.filter(r => r.status === 'approved').length;
+  const myApprovalsCount = pendingApproval.length;
+
+  // ============================================================================
+  // RENDER
+  // ============================================================================
+
+  const noticeValidation = validateMinimumNotice();
+
   return (
-    <div>
+    <div style={{ padding: '24px' }}>
+      {/* Header */}
       <PageHeader
         title="Leave Management"
-        subtitle={`${filteredRequests.length} request${filteredRequests.length !== 1 ? 's' : ''} found`}
-        breadcrumbs={[{ title: 'Human Resources' }, { title: 'Leave Management' }]}
+        subtitle="Apply for leave, track balances, and manage approvals"
         actions={
           <Space>
-            <Button
-              icon={<SettingOutlined />}
-              onClick={() => navigate('/hr/leave-configuration')}
-              style={{ borderRadius: '8px', fontWeight: 500 }}
-            >
-              Configuration
+            <Button icon={<InfoCircleOutlined />} size="large" onClick={handleShowMyBalances}>
+              My Balances
             </Button>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={() => setRequestModalVisible(true)}
-              style={{
-                borderRadius: '8px',
-                background: 'linear-gradient(135deg, #00d084 0%, #00BFA5 100%)',
-                border: 'none',
-                fontWeight: 500,
-              }}
-            >
-              Request Leave
+            <Button type="primary" icon={<PlusOutlined />} size="large" onClick={handleCreateLeave}>
+              Apply for Leave
             </Button>
           </Space>
         }
       />
 
-      {/* My Leave Balances */}
-      {user?.id && (
-        <Card
-          title={
-            <Space>
-              <CalendarOutlined />
-              <span>My Leave Balances</span>
-            </Space>
-          }
-          style={{ marginBottom: '20px' }}
-          extra={
-            <Button
-              type="link"
-              icon={<HistoryOutlined />}
-              onClick={() => handleViewTransactions('annual')}
-            >
-              View History
-            </Button>
-          }
-        >
-          <Row gutter={[16, 16]}>
-            {mockLeavePolicies
-              .filter((p) => p.isActive && p.accrualMethod !== 'none')
-              .map((policy) => {
-                const balance = fetchLeaveBalance(user.id!, policy.leaveType);
-                const percentage = balance
-                  ? Math.round((balance.availableBalance / (policy.annualEntitlementDays || 1)) * 100)
-                  : 0;
-
-                return (
-                  <Col xs={24} sm={12} md={8} lg={6} key={policy.leaveType}>
-                    <Card
-                      size="small"
-                      hoverable
-                      onClick={() => handleViewBalance(policy.leaveType)}
-                      style={{
-                        borderLeft: `4px solid ${LEAVE_TYPE_COLORS[policy.leaveType] || '#ccc'}`,
-                      }}
-                    >
-                      <div style={{ marginBottom: '8px' }}>
-                        <span style={{ fontSize: '20px', marginRight: '6px' }}>
-                          {LEAVE_TYPE_ICONS[policy.leaveType]}
-                        </span>
-                        <span style={{ fontWeight: 600, color: '#32373c' }}>
-                          {policy.displayName}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: '28px', fontWeight: 700, marginBottom: '8px' }}>
-                        {balance?.availableBalance || 0}
-                        <span style={{ fontSize: '14px', fontWeight: 400, color: '#8c8c8c' }}>
-                          {' '}
-                          / {policy.annualEntitlementDays || '-'} days
-                        </span>
-                      </div>
-                      <Progress
-                        percent={percentage}
-                        strokeColor={LEAVE_TYPE_COLORS[policy.leaveType]}
-                        showInfo={false}
-                        size="small"
-                      />
-                      <div style={{ marginTop: '8px', fontSize: '11px', color: '#8c8c8c' }}>
-                        <Row>
-                          <Col span={12}>
-                            Used: <strong>{balance?.totalUsed || 0}</strong>
-                          </Col>
-                          <Col span={12} style={{ textAlign: 'right' }}>
-                            Pending: <strong>{balance?.totalPending || 0}</strong>
-                          </Col>
-                        </Row>
-                      </div>
-                    </Card>
-                  </Col>
-                );
-              })}
-          </Row>
-        </Card>
-      )}
-
-      {/* Statistics Cards */}
-      <Row gutter={[20, 20]} style={{ marginBottom: '20px' }}>
-        <Col xs={24} sm={12} md={6}>
+      {/* Statistics */}
+      <Row gutter={[16, 16]} style={{ marginBottom: '24px' }}>
+        <Col xs={24} sm={12} lg={6}>
           <StatCard
             title="Total Requests"
             value={totalRequests}
             icon={<FileTextOutlined />}
-            iconBg="rgba(103, 58, 183, 0.1)"
+            iconBg="rgba(0, 208, 132, 0.1)"
+            style={{ borderLeft: '4px solid #00d084' }}
           />
         </Col>
-        <Col xs={24} sm={12} md={6}>
+        <Col xs={24} sm={12} lg={6}>
           <StatCard
-            title="Pending Approval"
-            value={pendingCount}
+            title="Pending"
+            value={pendingRequests}
             icon={<ClockCircleOutlined />}
             iconBg="rgba(255, 105, 0, 0.1)"
+            style={{ borderLeft: '4px solid #ff6900' }}
           />
         </Col>
-        <Col xs={24} sm={12} md={6}>
+        <Col xs={24} sm={12} lg={6}>
           <StatCard
-            title="Approved Leaves"
-            value={approvedCount}
+            title="Approved"
+            value={approvedRequests}
             icon={<CheckOutlined />}
             iconBg="rgba(0, 208, 132, 0.1)"
+            style={{ borderLeft: '4px solid #00d084' }}
           />
         </Col>
-        <Col xs={24} sm={12} md={6}>
-          <Badge count={pendingMyApproval.length} offset={[-10, 10]}>
-            <StatCard
-              title="Awaiting My Approval"
-              value={pendingMyApproval.length}
-              icon={<ExclamationCircleOutlined />}
-              iconBg="rgba(255, 193, 7, 0.1)"
-            />
-          </Badge>
+        <Col xs={24} sm={12} lg={6}>
+          <StatCard
+            title="Pending My Approval"
+            value={myApprovalsCount}
+            icon={<ExclamationCircleOutlined />}
+            iconBg="rgba(236, 72, 153, 0.1)"
+            style={{ borderLeft: '4px solid #ec4899' }}
+          />
         </Col>
       </Row>
 
-      {/* Tabs */}
-      <Card style={{ marginBottom: '20px' }}>
-        <Tabs activeKey={activeTab} onChange={setActiveTab}>
-          <TabPane tab={`All Requests (${allRequests.length})`} key="all" />
-          <TabPane tab={`My Requests (${myRequests.length})`} key="my-requests" />
-          <TabPane
-            tab={
-              <Badge count={pendingMyApproval.length} offset={[10, 0]}>
-                Pending My Approval
-              </Badge>
-            }
-            key="pending-approval"
-          />
-        </Tabs>
+      {/* Leave Requests Table */}
+      <Card>
+        <Tabs
+          activeKey={activeTab}
+          onChange={setActiveTab}
+          items={[
+            {
+              key: 'my-requests',
+              label: 'My Requests',
+              children: (
+                <DataTable
+                  columns={columns}
+                  dataSource={myRequests}
+                  loading={requestsLoading}
+                  rowKey="id"
+                  pagination={{ pageSize: 10 }}
+                />
+              ),
+            },
+            {
+              key: 'pending-approval',
+              label: `Pending My Approval (${myApprovalsCount})`,
+              children: (
+                <DataTable
+                  columns={columns}
+                  dataSource={pendingApproval}
+                  loading={requestsLoading}
+                  rowKey="id"
+                  pagination={{ pageSize: 10 }}
+                />
+              ),
+            },
+            ...(user?.role && ['hr_manager', 'hr_employee', 'admin'].includes(user.role)
+              ? [{
+                  key: 'all',
+                  label: 'All Requests',
+                  children: (
+                    <DataTable
+                      columns={columns}
+                      dataSource={allRequests}
+                      loading={requestsLoading}
+                      rowKey="id"
+                      pagination={{ pageSize: 10 }}
+                    />
+                  ),
+                }]
+              : []
+            ),
+          ]}
+        />
       </Card>
 
-      {/* Filters */}
-      <FilterBar filters={filters} onSearch={setSearchTerm} onReset={handleReset} />
-
-      {/* Requests Table */}
-      <DataTable
-        columns={columns}
-        dataSource={filteredRequests}
-        rowKey="id"
-        loading={loading}
-        pagination={{
-          pageSize: 10,
-          showSizeChanger: true,
-          showTotal: (total, range) => `Showing ${range[0]} to ${range[1]} of ${total} entries`,
-        }}
-        scroll={{ x: 1400 }}
-      />
-
-      {/* Leave Request Modal */}
+      {/* CREATE LEAVE REQUEST MODAL - Configuration-Driven Dynamic Form */}
       <Modal
-        title={
-          <Space>
-            <PlusOutlined />
-            <span>Request Leave</span>
-          </Space>
-        }
-        open={requestModalVisible}
-        onCancel={() => {
-          setRequestModalVisible(false);
-          form.resetFields();
-          setFormLeaveType(undefined);
-          setFormDateRange(null);
-        }}
-        onOk={form.submit}
-        width={700}
-        okText="Submit Request"
-        okButtonProps={{
-          disabled: validationErrors.length > 0,
-        }}
+        title="Apply for Leave"
+        open={isCreateModalOpen}
+        onCancel={() => setIsCreateModalOpen(false)}
+        footer={null}
+        width={800}
       >
         <Form form={form} layout="vertical" onFinish={handleSubmitLeaveRequest}>
+          {/* Leave Type Selection */}
           <Form.Item
             label="Leave Type"
-            name="leaveType"
+            name="leave_policy"
             rules={[{ required: true, message: 'Please select leave type' }]}
           >
             <Select
               placeholder="Select leave type"
               size="large"
-              onChange={(value) => setFormLeaveType(value)}
-            >
-              {mockLeavePolicies
-                .filter((p) => p.isActive)
-                .map((policy) => (
-                  <Select.Option key={policy.leaveType} value={policy.leaveType}>
-                    <Space>
-                      <span>{LEAVE_TYPE_ICONS[policy.leaveType]}</span>
-                      <span>{policy.displayName}</span>
-                      {policy.isStatutory && <Tag color="blue">Statutory</Tag>}
-                    </Space>
-                  </Select.Option>
-                ))}
-            </Select>
+              loading={policiesLoading}
+              onChange={handlePolicyChange}
+              options={policies.map(policy => ({
+                label: (
+                  <div>
+                    <span style={{ marginRight: '8px' }}>{LEAVE_TYPE_ICONS[policy.leave_type]}</span>
+                    {policy.display_name}
+                    {policy.is_statutory && <Tag color="blue" style={{ marginLeft: '8px' }}>Statutory</Tag>}
+                  </div>
+                ),
+                value: policy.id,
+              }))}
+            />
           </Form.Item>
 
+          {/* Gender Error Alert */}
+          {genderError && (
+            <Alert
+              type="error"
+              message="Not Eligible"
+              description={genderError}
+              showIcon
+              icon={<ExclamationCircleOutlined />}
+              style={{ marginBottom: '16px' }}
+            />
+          )}
+
+          {/* Balance Display */}
+          {balance && selectedPolicy && !genderError && (
+            <Alert
+              type="info"
+              message={
+                <div>
+                  <div style={{ fontSize: '16px', fontWeight: 600, marginBottom: '8px' }}>
+                    Available {selectedPolicy.display_name}: {balance.available_balance} days
+                  </div>
+                  <div style={{ fontSize: '12px', color: '#8c8c8c' }}>
+                    Total Accrued: {balance.total_accrued} days |
+                    Used: {balance.total_used} days |
+                    Pending: {balance.total_pending} days
+                  </div>
+                </div>
+              }
+              icon={<InfoCircleOutlined />}
+              showIcon
+              style={{ marginBottom: '16px' }}
+            />
+          )}
+
+          {balanceLoading && (
+            <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+              <Spin tip="Loading balance..." />
+            </div>
+          )}
+
+          {/* Date Range */}
           <Form.Item
-            label="Leave Duration"
+            label="Leave Period"
             name="dateRange"
-            rules={[{ required: true, message: 'Please select leave duration' }]}
+            rules={[{ required: true, message: 'Please select leave dates' }]}
           >
             <RangePicker
-              style={{ width: '100%' }}
               size="large"
+              style={{ width: '100%' }}
               format="DD/MM/YYYY"
-              onChange={(dates) => setFormDateRange(dates as [Dayjs, Dayjs] | null)}
+              onChange={handleDateRangeChange}
+              disabled={!!genderError}
             />
           </Form.Item>
 
-          {/* Real-time validation feedback */}
-          {calculatedDays > 0 && (
+          {/* Calculated Working Days */}
+          {calculatedDays && (
             <Alert
-              message={`Calculated Leave Days: ${calculatedDays} days`}
-              type="info"
-              showIcon
-              icon={<InfoCircleOutlined />}
-              style={{ marginBottom: '16px' }}
-            />
-          )}
-
-          {validationErrors.length > 0 && (
-            <Alert
-              message="Validation Errors"
+              type="success"
+              message={`Calculated Leave Days: ${calculatedDays.working_days} working days`}
               description={
-                <ul style={{ margin: 0, paddingLeft: '20px' }}>
-                  {validationErrors.map((error, i) => (
-                    <li key={i}>{error}</li>
-                  ))}
-                </ul>
+                <div style={{ fontSize: '12px' }}>
+                  Total: {calculatedDays.total_days} calendar days
+                  {calculatedDays.weekends_excluded > 0 && ` | Weekends excluded: ${calculatedDays.weekends_excluded}`}
+                  {calculatedDays.public_holidays_excluded > 0 && ` | Public holidays excluded: ${calculatedDays.public_holidays_excluded}`}
+                </div>
               }
-              type="error"
               showIcon
               style={{ marginBottom: '16px' }}
             />
           )}
 
-          {validationWarnings.length > 0 && (
+          {calculatingDays && (
+            <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+              <Spin tip="Calculating working days..." />
+            </div>
+          )}
+
+          {/* Minimum Notice Warning */}
+          {noticeValidation && (
             <Alert
-              message="Warnings"
-              description={
-                <ul style={{ margin: 0, paddingLeft: '20px' }}>
-                  {validationWarnings.map((warning, i) => (
-                    <li key={i}>{warning}</li>
-                  ))}
-                </ul>
-              }
-              type="warning"
+              type={noticeValidation.type as any}
+              message="Notice Period"
+              description={noticeValidation.message}
               showIcon
               style={{ marginBottom: '16px' }}
             />
           )}
 
-          {formLeaveType === 'special' && (
-            <Form.Item
-              label="Special Leave Trigger"
-              name="specialLeaveTrigger"
-              rules={[{ required: true, message: 'Please select trigger' }]}
-            >
-              <Select placeholder="Select reason" size="large">
-                <Select.Option value="bereavement">Bereavement (Death of family member)</Select.Option>
-                <Select.Option value="wedding">Wedding (Own or immediate family)</Select.Option>
-                <Select.Option value="court-witness">Court Witness / Jury Duty</Select.Option>
-                <Select.Option value="military-service">Military Service</Select.Option>
-                <Select.Option value="relocation">Relocation / Moving</Select.Option>
-                <Select.Option value="other">Other (Management approval required)</Select.Option>
-              </Select>
+          {/* Half Day Option */}
+          {selectedPolicy?.supports_half_days && (
+            <Form.Item name="is_half_day" valuePropName="checked">
+              <Checkbox>This is a half-day leave</Checkbox>
             </Form.Item>
           )}
 
+          {/* Emergency Leave */}
+          <Form.Item name="is_emergency_leave" valuePropName="checked">
+            <Checkbox>Emergency leave (bypasses minimum notice requirement)</Checkbox>
+          </Form.Item>
+
+          {/* Special Leave Trigger - Only for Special Leave */}
+          {selectedPolicy?.leave_type === 'special' && (
+            <Form.Item
+              label="Special Leave Reason"
+              name="special_leave_trigger"
+              rules={[{ required: true, message: 'Please select statutory trigger reason' }]}
+            >
+              <Select
+                placeholder="Select reason"
+                size="large"
+                options={SPECIAL_LEAVE_TRIGGERS}
+              />
+            </Form.Item>
+          )}
+
+          {/* Reason */}
           <Form.Item
-            label="Reason for Leave"
+            label="Reason"
             name="reason"
-            rules={[{ required: true, message: 'Please enter reason for leave' }]}
+            rules={[{ required: true, message: 'Please provide a reason' }]}
           >
             <TextArea
               rows={4}
-              placeholder="Please provide detailed reason for your leave request..."
-              maxLength={500}
-              showCount
+              placeholder="Explain why you need this leave..."
+              disabled={!!genderError}
             />
           </Form.Item>
 
-          <Form.Item label="Handover Notes" name="handoverNotes">
+          {/* Handover Notes */}
+          <Form.Item
+            label="Handover Notes"
+            name="handover_notes"
+            tooltip="Provide details about work handover during your absence"
+          >
             <TextArea
               rows={3}
-              placeholder="Provide handover notes for colleagues covering your duties..."
-              maxLength={500}
-              showCount
+              placeholder="Describe work handover arrangements, pending tasks, or responsibilities to be delegated..."
+              disabled={!!genderError}
             />
           </Form.Item>
 
-          <Form.Item label="Supporting Documents" name="attachments">
-            <Upload beforeUpload={() => false} maxCount={5}>
-              <Button icon={<UploadOutlined />}>Upload Documents</Button>
-            </Upload>
-            <div style={{ fontSize: '12px', color: '#8c8c8c', marginTop: '8px' }}>
-              Medical certificates required for sick leave &gt; 3 days
-            </div>
+          {/* Address During Leave */}
+          <Form.Item
+            label="Address During Leave"
+            name="address_during_leave"
+            tooltip="Where you can be reached during your leave"
+            rules={[{ max: 500, message: 'Address cannot exceed 500 characters' }]}
+          >
+            <Input
+              placeholder="Enter your address while on leave"
+              disabled={!!genderError}
+            />
           </Form.Item>
 
-          <Form.Item name="isEmergency" valuePropName="checked">
-            <div>
-              <input type="checkbox" id="emergency" />
-              <label htmlFor="emergency" style={{ marginLeft: '8px' }}>
-                This is an emergency leave request
-              </label>
-            </div>
+          {/* Contact Number During Leave */}
+          <Form.Item
+            label="Contact Number During Leave"
+            name="contact_during_leave"
+            tooltip="Phone number where you can be reached"
+            rules={[
+              { max: 50, message: 'Contact number cannot exceed 50 characters' },
+              {
+                pattern: /^[\d\s\-+()]+$/,
+                message: 'Please enter a valid phone number',
+              },
+            ]}
+          >
+            <Input
+              placeholder="e.g., +263 77 123 4567"
+              disabled={!!genderError}
+            />
+          </Form.Item>
+
+          {/* Document Upload - Conditional based on policy */}
+          {selectedPolicy?.requires_documentation && (
+            <Form.Item label="Supporting Documents">
+              <Upload
+                fileList={fileList}
+                onChange={({ fileList }) => setFileList(fileList)}
+                beforeUpload={() => false}
+                maxCount={5}
+                disabled={!!genderError}
+              >
+                <Button icon={<UploadOutlined />} size="large">
+                  Upload Documents ({fileList.length} file{fileList.length !== 1 ? 's' : ''})
+                </Button>
+              </Upload>
+              <Alert
+                type={selectedPolicy.documentation_mandatory ? 'warning' : 'info'}
+                message={
+                  selectedPolicy.documentation_mandatory
+                    ? `REQUIRED: ${selectedPolicy.documentation_types?.join(', ')} - You have uploaded ${fileList.length} file(s)`
+                    : `Recommended: ${selectedPolicy.documentation_types?.join(', ')}`
+                }
+                showIcon
+                style={{ marginTop: '8px' }}
+              />
+            </Form.Item>
+          )}
+
+          {/* Submit */}
+          <Form.Item>
+            <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+              <Button onClick={() => setIsCreateModalOpen(false)}>Cancel</Button>
+              <Button
+                type="primary"
+                htmlType="submit"
+                size="large"
+                disabled={!!genderError}
+              >
+                Submit Leave Request
+              </Button>
+            </Space>
           </Form.Item>
         </Form>
       </Modal>
 
-      {/* Approval Modal */}
+      {/* My Balances Modal */}
       <Modal
-        title="Approve Leave Request"
-        open={approvalModalVisible}
-        onCancel={() => {
-          setApprovalModalVisible(false);
-          approvalForm.resetFields();
-        }}
-        onOk={handleApprove}
-        okText="Approve"
-        okButtonProps={{
-          style: {
-            background: 'linear-gradient(135deg, #00d084 0%, #00BFA5 100%)',
-            border: 'none',
-          },
-        }}
+        title={
+          <Space>
+            <InfoCircleOutlined />
+            <span>My Leave Balances</span>
+          </Space>
+        }
+        open={isBalancesModalOpen}
+        onCancel={() => setIsBalancesModalOpen(false)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setIsBalancesModalOpen(false)}>
+            Close
+          </Button>,
+        ]}
+        width={1200}
       >
-        {selectedRequest && (
-          <div>
-            <p>
-              <strong>Employee:</strong> {selectedRequest.requestorName}
-            </p>
-            <p>
-              <strong>Leave Type:</strong>{' '}
-              <Tag color={LEAVE_TYPE_COLORS[selectedRequest.data.leaveType]}>
-                {selectedRequest.data.leaveType.toUpperCase()}
-              </Tag>
-            </p>
-            <p>
-              <strong>Duration:</strong> {selectedRequest.data.days} days (
-              {dayjs(selectedRequest.data.startDate).format('DD/MM/YYYY')} →{' '}
-              {dayjs(selectedRequest.data.endDate).format('DD/MM/YYYY')})
-            </p>
-            <p>
-              <strong>Reason:</strong> {selectedRequest.data.reason}
-            </p>
-            <Divider />
-            <Form form={approvalForm} layout="vertical">
-              <Form.Item label="Approval Comment (Optional)" name="comment">
-                <TextArea rows={3} placeholder="Add any comments..." />
-              </Form.Item>
-            </Form>
-          </div>
-        )}
-      </Modal>
+        <Spin spinning={myBalancesLoading}>
+          {myBalances.length === 0 && !myBalancesLoading ? (
+            <Alert
+              message="No Leave Balances"
+              description="You don't have any leave balances yet. Please contact HR to allocate leave to your account."
+              type="info"
+              showIcon
+            />
+          ) : (
+            <div>
+              <Alert
+                message="Your Current Leave Balances"
+                description={`Showing balances for ${user?.name}${user?.employeeNumber ? ` (${user.employeeNumber})` : ''}`}
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+              />
 
-      {/* Rejection Modal */}
-      <Modal
-        title="Reject Leave Request"
-        open={rejectionModalVisible}
-        onCancel={() => {
-          setRejectionModalVisible(false);
-          rejectionForm.resetFields();
-        }}
-        onOk={handleReject}
-        okText="Reject"
-        okButtonProps={{ danger: true }}
-      >
-        {selectedRequest && (
-          <div>
-            <p>
-              <strong>Employee:</strong> {selectedRequest.requestorName}
-            </p>
-            <p>
-              <strong>Leave Type:</strong>{' '}
-              <Tag color={LEAVE_TYPE_COLORS[selectedRequest.data.leaveType]}>
-                {selectedRequest.data.leaveType.toUpperCase()}
-              </Tag>
-            </p>
-            <Divider />
-            <Form form={rejectionForm} layout="vertical">
-              <Form.Item
-                label="Rejection Reason"
-                name="comment"
-                rules={[{ required: true, message: 'Please provide a reason for rejection' }]}
-              >
-                <TextArea
-                  rows={4}
-                  placeholder="Explain why this leave request is being rejected..."
-                  maxLength={500}
-                  showCount
-                />
-              </Form.Item>
-            </Form>
-          </div>
-        )}
-      </Modal>
+              {myBalances.map((balance) => {
+                const leaveType = balance.leave_type;
+                const color = LEAVE_TYPE_COLORS[leaveType] || '#8c8c8c';
+                const icon = LEAVE_TYPE_ICONS[leaveType] || '📋';
+                const usagePercent = balance.total_accrued > 0
+                  ? Math.round((balance.total_used / balance.total_accrued) * 100)
+                  : 0;
 
-      {/* Balance Details Drawer */}
-      <Drawer
-        title={`${selectedLeaveType.toUpperCase()} Leave Balance`}
-        placement="right"
-        onClose={() => setBalanceDrawerVisible(false)}
-        open={balanceDrawerVisible}
-        width={500}
-      >
-        {user?.id && (
-          <div>
-            {(() => {
-              const balance = fetchLeaveBalance(user.id!, selectedLeaveType);
-              const policy = getLeavePolicy(selectedLeaveType);
-
-              return balance && policy ? (
-                <>
-                  <Card>
-                    <div style={{ textAlign: 'center', marginBottom: '16px' }}>
-                      <div style={{ fontSize: '48px' }}>{LEAVE_TYPE_ICONS[selectedLeaveType]}</div>
-                      <div style={{ fontSize: '32px', fontWeight: 700, marginTop: '8px' }}>
-                        {balance.availableBalance} days
-                      </div>
-                      <div style={{ fontSize: '14px', color: '#8c8c8c' }}>Available Balance</div>
-                    </div>
-
-                    <Divider />
-
-                    <Row gutter={[16, 16]}>
-                      <Col span={12}>
-                        <div style={{ textAlign: 'center' }}>
-                          <div style={{ fontSize: '24px', fontWeight: 600, color: '#00d084' }}>
-                            {balance.totalAccrued}
+                return (
+                  <Card key={balance.policy_id} size="small" style={{ marginBottom: 16 }}>
+                    <Row gutter={16} align="middle">
+                      <Col span={8}>
+                        <Space>
+                          <span style={{ fontSize: '24px' }}>{icon}</span>
+                          <div>
+                            <Title level={5} style={{ margin: 0 }}>
+                              {balance.policy_name}
+                            </Title>
+                            <Tag color={color} style={{ marginTop: 4 }}>
+                              {balance.leave_type.toUpperCase()}
+                            </Tag>
                           </div>
-                          <div style={{ fontSize: '12px', color: '#8c8c8c' }}>Total Accrued</div>
-                        </div>
+                        </Space>
                       </Col>
-                      <Col span={12}>
-                        <div style={{ textAlign: 'center' }}>
-                          <div style={{ fontSize: '24px', fontWeight: 600, color: '#ff4d4f' }}>
-                            {balance.totalUsed}
-                          </div>
-                          <div style={{ fontSize: '12px', color: '#8c8c8c' }}>Total Used</div>
-                        </div>
-                      </Col>
-                      <Col span={12}>
-                        <div style={{ textAlign: 'center' }}>
-                          <div style={{ fontSize: '24px', fontWeight: 600, color: '#ff6900' }}>
-                            {balance.totalApprovedFuture}
-                          </div>
-                          <div style={{ fontSize: '12px', color: '#8c8c8c' }}>Approved (Future)</div>
-                        </div>
-                      </Col>
-                      <Col span={12}>
-                        <div style={{ textAlign: 'center' }}>
-                          <div style={{ fontSize: '24px', fontWeight: 600, color: '#8c8c8c' }}>
-                            {balance.totalPending}
-                          </div>
-                          <div style={{ fontSize: '12px', color: '#8c8c8c' }}>Pending Approval</div>
+
+                      <Col span={16}>
+                        <Row gutter={8}>
+                          <Col span={6}>
+                            <Statistic
+                              title="Accrued"
+                              value={balance.total_accrued}
+                              suffix="days"
+                              valueStyle={{ fontSize: '16px' }}
+                            />
+                          </Col>
+                          <Col span={6}>
+                            <Statistic
+                              title="Used"
+                              value={balance.total_used}
+                              suffix="days"
+                              valueStyle={{ fontSize: '16px', color: '#ff6900' }}
+                            />
+                          </Col>
+                          <Col span={6}>
+                            <Statistic
+                              title="Pending"
+                              value={balance.total_pending}
+                              suffix="days"
+                              valueStyle={{ fontSize: '16px', color: '#faad14' }}
+                            />
+                          </Col>
+                          <Col span={6}>
+                            <Statistic
+                              title="Available"
+                              value={balance.available_balance}
+                              suffix="days"
+                              valueStyle={{ fontSize: '16px', color: '#00d084', fontWeight: 'bold' }}
+                            />
+                          </Col>
+                        </Row>
+
+                        <div style={{ marginTop: 12 }}>
+                          <Text type="secondary" style={{ fontSize: '12px' }}>
+                            Usage: {usagePercent}%
+                          </Text>
+                          <Progress
+                            percent={usagePercent}
+                            strokeColor={color}
+                            status="active"
+                            showInfo={false}
+                            style={{ marginTop: 4 }}
+                          />
                         </div>
                       </Col>
                     </Row>
-
-                    <Divider />
-
-                    <div>
-                      <h4>Policy Details</h4>
-                      <p>
-                        <strong>Annual Entitlement:</strong> {policy.annualEntitlementDays} days
-                      </p>
-                      <p>
-                        <strong>Accrual Method:</strong> {policy.accrualMethod}
-                      </p>
-                      {policy.maxAccumulationDays && (
-                        <p>
-                          <strong>Maximum Cap:</strong> {policy.maxAccumulationDays} days
-                        </p>
-                      )}
-                      {policy.statutoryReference && (
-                        <p>
-                          <strong>Statutory Ref:</strong> {policy.statutoryReference}
-                        </p>
-                      )}
-                    </div>
                   </Card>
-
-                  <Button
-                    type="primary"
-                    block
-                    style={{ marginTop: '16px' }}
-                    onClick={() => handleViewTransactions(selectedLeaveType)}
-                  >
-                    View Transaction History
-                  </Button>
-                </>
-              ) : (
-                <Alert message="Balance information not available" type="info" />
-              );
-            })()}
-          </div>
-        )}
-      </Drawer>
-
-      {/* Transaction History Drawer */}
-      <Drawer
-        title={`${selectedLeaveType.toUpperCase()} Leave Transaction History`}
-        placement="right"
-        onClose={() => setTransactionDrawerVisible(false)}
-        open={transactionDrawerVisible}
-        width={600}
-      >
-        <Timeline mode="left">
-          {transactionHistory.map((txn) => {
-            const isCredit = txn.amount > 0;
-            return (
-              <Timeline.Item
-                key={txn.id}
-                color={isCredit ? 'green' : 'red'}
-                label={dayjs(txn.effectiveDate).format('DD/MM/YYYY')}
-              >
-                <Card size="small">
-                  <div style={{ marginBottom: '8px' }}>
-                    <Tag color={isCredit ? 'success' : 'error'}>
-                      {isCredit ? '+' : ''}
-                      {txn.amount} days
-                    </Tag>
-                    <Tag>{txn.transactionType.toUpperCase()}</Tag>
-                  </div>
-                  <p style={{ margin: 0, fontSize: '13px' }}>{txn.reason}</p>
-                  {txn.notes && (
-                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#8c8c8c' }}>
-                      {txn.notes}
-                    </p>
-                  )}
-                  <div style={{ marginTop: '8px', fontSize: '11px', color: '#8c8c8c' }}>
-                    Created: {dayjs(txn.createdAt).format('DD/MM/YYYY HH:mm')}
-                  </div>
-                </Card>
-              </Timeline.Item>
-            );
-          })}
-        </Timeline>
-      </Drawer>
+                );
+              })}
+            </div>
+          )}
+        </Spin>
+      </Modal>
     </div>
   );
 };

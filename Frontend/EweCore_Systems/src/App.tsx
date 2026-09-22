@@ -7,6 +7,8 @@ import { RoleBasedRoute } from './routes/RoleBasedRoute';
 import { LoginPage } from './features/auth/LoginPage';
 import { ForgotPasswordPage } from './features/auth/ForgotPasswordPage';
 import { DashboardPage } from './features/dashboard/DashboardPage';
+import { SplashScreen } from './assets/animated-logo';
+import { useSplashScreen } from './hooks/useSplashScreen';
 import { EmployeesPage } from './features/hr/EmployeesPage';
 import { EmployeeDetailsPage } from './features/hr/EmployeeDetailsPage';
 import { DepartmentsPage } from './features/hr/DepartmentsPage';
@@ -20,16 +22,17 @@ import { PayablesPage } from './features/finance/PayablesPage';
 import { PayablesCalendar } from './features/finance/PayablesCalendar';
 import { ReceivablesPage } from './features/finance/ReceivablesPage';
 import { ReceivablesCalendar } from './features/finance/ReceivablesCalendar';
+import { FinanceSettingsPage } from './features/finance/FinanceSettingsPage';
 import { AssetManagerPage } from './features/assets/AssetManagerPage';
 import { FleetPage } from './features/assets/FleetPage';
 import { EmployeeDashboardPage } from './features/dashboard/EmployeeDashboardPage';
 import { OnboardingPage } from './features/hr/OnboardingPage';
 import { ApprovalsPage } from './features/approvals/ApprovalsPage';
 import { LeaveDetailsPage } from './features/hr/LeaveDetailsPage';
-import { LeaveConfigurationPage } from './features/hr/LeaveConfigurationPage';
+import { LeaveSettingsPage } from './features/hr/LeaveSettingsPage';
+import { LeaveBalancesPage } from './features/hr/LeaveBalancesPage';
 import { LeaveCalendarPage } from './features/hr/LeaveCalendarPage';
 import { ApprovalWorkflowConfigPage } from './features/hr/ApprovalWorkflowConfigPage';
-import { LeaveSystemSettingsPage } from './features/hr/LeaveSystemSettingsPage';
 import { OnboardingDetailsPage } from './features/hr/OnboardingDetailsPage';
 import { ProfilePage } from './features/profile/ProfilePage';
 import { SettingsPage } from './features/settings/SettingsPage';
@@ -48,6 +51,13 @@ import { ReportViewerPage } from './features/reports/ReportViewerPage';
 const NotificationsPage = () => <div><h2>Notifications</h2><p>Notifications coming soon...</p></div>;
 
 function App() {
+  const showSplash = useSplashScreen();
+
+  // Show splash screen during initial load
+  if (showSplash) {
+    return <SplashScreen />;
+  }
+
   return (
     <ConfigProvider
       theme={{
@@ -183,7 +193,7 @@ function App() {
               path="hr/leave-configuration"
               element={
                 <RoleBasedRoute allowedRoles={['hr_manager', 'ceo', 'admin']}>
-                  <LeaveConfigurationPage />
+                  <LeaveSettingsPage />
                 </RoleBasedRoute>
               }
             />
@@ -192,6 +202,14 @@ function App() {
               element={
                 <RoleBasedRoute allowedRoles={['manager', 'hr_manager', 'finance_manager', 'ceo', 'admin']}>
                   <LeaveCalendarPage />
+                </RoleBasedRoute>
+              }
+            />
+            <Route
+              path="hr/leave-balances"
+              element={
+                <RoleBasedRoute allowedRoles={['hr_manager', 'hr_employee', 'ceo', 'admin']}>
+                  <LeaveBalancesPage />
                 </RoleBasedRoute>
               }
             />
@@ -207,7 +225,7 @@ function App() {
               path="hr/leave-settings"
               element={
                 <RoleBasedRoute allowedRoles={['hr_manager', 'ceo', 'admin']}>
-                  <LeaveSystemSettingsPage />
+                  <LeaveSettingsPage />
                 </RoleBasedRoute>
               }
             />
@@ -298,6 +316,14 @@ function App() {
               element={
                 <RoleBasedRoute allowedRoles={['manager', 'hr_manager', 'finance_manager', 'ceo', 'admin']}>
                   <ReceivablesCalendar />
+                </RoleBasedRoute>
+              }
+            />
+            <Route
+              path="finance/settings"
+              element={
+                <RoleBasedRoute allowedRoles={['finance_manager', 'ceo', 'admin']}>
+                  <FinanceSettingsPage />
                 </RoleBasedRoute>
               }
             />

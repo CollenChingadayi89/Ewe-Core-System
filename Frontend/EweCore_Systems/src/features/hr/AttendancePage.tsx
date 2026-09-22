@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Row, Col, Card, Button, Typography, Table, Tag, Space, Select, DatePicker, message, Modal, Form, Input } from 'antd';
 import {
   CheckCircleOutlined,
@@ -10,7 +10,7 @@ import {
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { PageHeader, StatCard } from '../../components/common';
-import { mockEmployees } from '../../mock/employees';
+import { useAttendanceStore } from '../../store/attendanceStore';
 import dayjs from 'dayjs';
 
 const { Title, Text } = Typography;
@@ -35,26 +35,61 @@ export const AttendancePage = () => {
   const [selectedEmployee, setSelectedEmployee] = useState<any>(null);
   const [form] = Form.useForm();
 
-  // Mock attendance records for today
-  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>(
-    mockEmployees.map((emp) => ({
-      id: `ATT-${emp.id}-${selectedDate.format('YYYYMMDD')}`,
-      employeeId: emp.id,
-      employeeName: emp.name,
-      department: emp.department,
-      date: selectedDate.format('DD/MM/YYYY'),
-      status: Math.random() > 0.2 ? 'Present' : Math.random() > 0.5 ? 'Absent' : 'Permission',
-      checkIn: Math.random() > 0.2 ? `0${Math.floor(Math.random() * 2) + 8}:${Math.floor(Math.random() * 60).toString().padStart(2, '0')} AM` : undefined,
-      checkOut: Math.random() > 0.2 ? `0${Math.floor(Math.random() * 2) + 5}:${Math.floor(Math.random() * 60).toString().padStart(2, '0')} PM` : undefined,
-    }))
-  );
+  // Get data from store
+  const {
+    attendanceRecords: apiRecords,
+    statistics,
+    loading,
+    fetchAttendance,
+    fetchStatistics,
+    createAttendance,
+    updateAttendance,
+  } = useAttendanceStore();
 
-  // Calculate statistics
-  const totalEmployees = attendanceRecords.length;
-  const presentCount = attendanceRecords.filter((r) => r.status === 'Present').length;
-  const absentCount = attendanceRecords.filter((r) => r.status === 'Absent').length;
-  const permissionCount = attendanceRecords.filter((r) => r.status === 'Permission').length;
-  const attendanceRate = ((presentCount / totalEmployees) * 100).toFixed(1);
+  // Fetch data on mount and when date changes
+  useEffect(() => {
+    const dateStr = selectedDate.format('YYYY-MM-DD');
+    fetchAttendance({
+      date: dateStr,
+      ordering: 'employee__name',
+    });
+    fetchStatistics({
+      date_after: dateStr,
+      date_before: dateStr,
+    });
+  }, [selectedDate, fetchAttendance, fetchStatistics]);
+
+  // Map API data to component format
+  const mapApiAttendanceToComponent = (apiData: any): AttendanceRecord => {
+    const getDisplayStatus = (status: string): 'Present' | 'Absent' | 'Permission' | 'Half Day' => {
+      if (status === 'present') return 'Present';
+      if (status === 'absent') return 'Absent';
+      if (status === 'on_leave') return 'Permission';
+      if (status === 'half_day') return 'Half Day';
+      return 'Absent';
+    };
+
+    return {
+      id: apiData.id,
+      employeeId: apiData.employee_id || apiData.id,
+      employeeName: apiData.employee_name,
+      department: apiData.employee_department || '',
+      date: dayjs(apiData.date).format('DD/MM/YYYY'),
+      status: getDisplayStatus(apiData.status),
+      checkIn: apiData.check_in ? dayjs(apiData.check_in, 'HH:mm:ss').format('hh:mm A') : undefined,
+      checkOut: apiData.check_out ? dayjs(apiData.check_out, 'HH:mm:ss').format('hh:mm A') : undefined,
+      notes: apiData.notes,
+    };
+  };
+
+  const attendanceRecords = apiRecords.map(mapApiAttendanceToComponent);
+
+  // Calculate statistics with fallbacks
+  const totalEmployees = statistics?.total_employees || attendanceRecords.length;
+  const presentCount = statistics?.present || attendanceRecords.filter((r) => r.status === 'Present').length;
+  const absentCount = statistics?.absent || attendanceRecords.filter((r) => r.status === 'Absent').length;
+  const permissionCount = statistics?.on_leave || attendanceRecords.filter((r) => r.status === 'Permission').length;
+  const attendanceRate = statistics?.attendance_rate || ((presentCount / (totalEmployees || 1)) * 100).toFixed(1);
 
   // Filter records
   const filteredRecords = attendanceRecords.filter((record) => {
@@ -63,20 +98,27 @@ export const AttendancePage = () => {
   });
 
   // Handle status change
-  const handleStatusChange = (employeeId: string, newStatus: 'Present' | 'Absent' | 'Permission' | 'Half Day') => {
-    setAttendanceRecords((prev) =>
-      prev.map((record) =>
-        record.employeeId === employeeId
-          ? {
-              ...record,
-              status: newStatus,
-              checkIn: newStatus === 'Present' && !record.checkIn ? '08:30 AM' : record.checkIn,
-              checkOut: newStatus === 'Present' && !record.checkOut ? '05:30 PM' : record.checkOut,
-            }
-          : record
-      )
-    );
-    message.success(`Attendance marked as ${newStatus} for employee`);
+  const handleStatusChange = async (employeeId: string, newStatus: 'Present' | 'Absent' | 'Permission' | 'Half Day') => {
+    const record = attendanceRecords.find((r) => r.employeeId === employeeId);
+
+    // Convert display status to API status
+    const getApiStatus = (status: string): string => {
+      if (status === 'Present') return 'present';
+      if (status === 'Absent') return 'absent';
+      if (status === 'Permission') return 'on_leave';
+      if (status === 'Half Day') return 'half_day';
+      return 'absent';
+    };
+
+    const updateData = {
+      status: getApiStatus(newStatus),
+      check_in: newStatus === 'Present' && !record?.checkIn ? '08:30:00' : undefined,
+      check_out: newStatus === 'Present' && !record?.checkOut ? '17:30:00' : undefined,
+    };
+
+    if (record?.id) {
+      await updateAttendance(record.id, updateData);
+    }
   };
 
   // Handle manual time entry
@@ -94,21 +136,36 @@ export const AttendancePage = () => {
   };
 
   // Save manual time entry
-  const handleSaveTimeEntry = (values: any) => {
-    setAttendanceRecords((prev) =>
-      prev.map((record) =>
-        record.employeeId === selectedEmployee.id
-          ? {
-              ...record,
-              checkIn: values.checkIn,
-              checkOut: values.checkOut,
-              notes: values.notes,
-              status: 'Present',
-            }
-          : record
-      )
-    );
-    message.success('Time entry updated successfully');
+  const handleSaveTimeEntry = async (values: any) => {
+    const record = attendanceRecords.find((r) => r.employeeId === selectedEmployee.id);
+
+    // Convert 12-hour time to 24-hour format for API
+    const convertTo24Hour = (time12h: string): string => {
+      const [time, modifier] = time12h.split(' ');
+      let [hours, minutes] = time.split(':');
+
+      if (hours === '12') {
+        hours = '00';
+      }
+
+      if (modifier === 'PM') {
+        hours = String(parseInt(hours, 10) + 12);
+      }
+
+      return `${hours}:${minutes}:00`;
+    };
+
+    const updateData = {
+      check_in: values.checkIn ? convertTo24Hour(values.checkIn) : undefined,
+      check_out: values.checkOut ? convertTo24Hour(values.checkOut) : undefined,
+      notes: values.notes,
+      status: 'present',
+    };
+
+    if (record?.id) {
+      await updateAttendance(record.id, updateData);
+    }
+
     setModalVisible(false);
     form.resetFields();
   };

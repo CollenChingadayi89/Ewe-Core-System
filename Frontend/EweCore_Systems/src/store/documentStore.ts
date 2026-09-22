@@ -1,342 +1,241 @@
+/**
+ * Document Store - Zustand state management for document management
+ * Integrates with real API
+ */
+
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+import { documentApi, documentCategoryApi } from '../services/api/documents';
 import type {
-  Document,
-  DocumentRequest,
-  DocumentCategory,
-  DocumentAccessLevel,
-  ApprovalStatus,
-} from '../types/index';
-import {
-  mockDocuments,
-  getDocumentById,
-  getDocumentsByDepartment,
-  getDocumentsByCategory,
-  getPendingDocuments,
-  getUserDocuments,
-} from '../mock/documents';
+  DocumentListResponse,
+  DocumentDetailResponse,
+  DocumentCreateRequest,
+  DocumentFilters,
+  DocumentCategoryResponse,
+} from '../services/api/documents';
+import { message } from 'antd';
 
-interface DocumentUploadData {
-  title: string;
-  description?: string;
-  category: DocumentCategory;
-  file: File;
-  accessLevel: DocumentAccessLevel;
-  tags?: string[];
-}
-
-interface DocumentUpdateData {
-  title?: string;
-  description?: string;
-  category?: DocumentCategory;
-  tags?: string[];
-}
+// ============================================================================
+// STORE INTERFACE
+// ============================================================================
 
 interface DocumentState {
-  documents: Document[];
-  selectedDocument: Document | null;
+  // State
+  documents: DocumentListResponse[];
+  selectedDocument: DocumentDetailResponse | null;
+  categories: DocumentCategoryResponse[];
   loading: boolean;
   uploading: boolean;
+  error: string | null;
+  currentPage: number;
+  totalPages: number;
+  totalCount: number;
 
-  // Actions
-  fetchDocuments: (userId?: string, userDepartment?: string) => void;
-  fetchDocument: (id: string) => void;
-  uploadDocument: (
-    userId: string,
-    userName: string,
-    userDepartment: string,
-    data: DocumentUploadData
-  ) => Promise<void>;
-  updateDocument: (documentId: string, data: DocumentUpdateData) => Promise<void>;
-  deleteDocument: (documentId: string) => Promise<void>;
-  approveDocument: (documentId: string, approverId: string, approverName: string) => Promise<void>;
-  rejectDocument: (
-    documentId: string,
-    approverId: string,
-    approverName: string,
-    reason: string
-  ) => Promise<void>;
-  downloadDocument: (documentId: string) => void;
-  uploadNewVersion: (
-    documentId: string,
-    file: File,
-    userId: string,
-    userName: string,
-    changeNotes?: string
-  ) => Promise<void>;
+  // Actions - Standard CRUD
+  fetchDocuments: (filters?: DocumentFilters) => Promise<void>;
+  fetchDocumentById: (id: string) => Promise<void>;
+  createDocument: (data: DocumentCreateRequest) => Promise<DocumentDetailResponse | null>;
+  updateDocument: (id: string, data: Partial<DocumentCreateRequest>) => Promise<DocumentDetailResponse | null>;
+  deleteDocument: (id: string) => Promise<boolean>;
+
+  // Actions - Categories
+  fetchCategories: () => Promise<void>;
+
+  // Utility
+  clearError: () => void;
+  clearSelectedDocument: () => void;
 }
 
-export const useDocumentStore = create<DocumentState>((set, get) => ({
-  documents: [],
-  selectedDocument: null,
-  loading: false,
-  uploading: false,
+// ============================================================================
+// STORE IMPLEMENTATION
+// ============================================================================
 
-  fetchDocuments: (userId?: string, userDepartment?: string) => {
-    set({ loading: true });
-
-    // Simulate API call
-    setTimeout(() => {
-      let filteredDocs = [...mockDocuments];
-
-      // Filter documents based on user access
-      if (userDepartment) {
-        filteredDocs = filteredDocs.filter(
-          (doc) =>
-            // Show approved organization-wide documents
-            (doc.accessLevel === 'organization' && doc.status === 'approved') ||
-            // Show all documents from user's department (including pending if they uploaded)
-            (doc.department === userDepartment &&
-              (doc.status === 'approved' || doc.uploadedBy === userId))
-        );
-      }
-
-      set({ documents: filteredDocs, loading: false });
-    }, 300);
-  },
-
-  fetchDocument: (id: string) => {
-    set({ loading: true });
-
-    // Simulate API call
-    setTimeout(() => {
-      const document = getDocumentById(id);
-
-      // Increment view count
-      if (document) {
-        document.viewCount += 1;
-      }
-
-      set({ selectedDocument: document || null, loading: false });
-    }, 200);
-  },
-
-  uploadDocument: async (userId, userName, userDepartment, data) => {
-    set({ uploading: true });
-
-    // Simulate file upload API call
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-
-    // In a real app, file would be uploaded to cloud storage and URL returned
-    const mockFileUrl = `/documents/${userDepartment.toLowerCase()}/${data.file.name}`;
-
-    const newDocument: Document = {
-      id: `DOC${Date.now()}`,
-      title: data.title,
-      description: data.description,
-      category: data.category,
-      fileUrl: mockFileUrl,
-      fileName: data.file.name,
-      fileType: data.file.type.includes('pdf')
-        ? 'pdf'
-        : data.file.type.includes('word')
-        ? 'docx'
-        : data.file.type.includes('sheet')
-        ? 'xlsx'
-        : data.file.type.includes('presentation')
-        ? 'pptx'
-        : data.file.type.includes('image')
-        ? 'image'
-        : 'other',
-      fileSize: data.file.size,
-      accessLevel: data.accessLevel,
-      department: userDepartment,
-      departmentName: userDepartment,
-      uploadedBy: userId,
-      uploadedByName: userName,
-      uploadedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      status: 'pending', // Requires approval
-      currentVersion: 1,
-      versions: [
-        {
-          id: `VER${Date.now()}-1`,
-          version: 1,
-          fileUrl: mockFileUrl,
-          fileSize: data.file.size,
-          uploadedBy: userId,
-          uploadedByName: userName,
-          uploadedAt: new Date().toISOString(),
-        },
-      ],
-      tags: data.tags || [],
-      downloadCount: 0,
-      viewCount: 0,
-    };
-
-    set((state) => ({
-      documents: [newDocument, ...state.documents],
+export const useDocumentStore = create<DocumentState>()(
+  persist(
+    (set, get) => ({
+      // Initial State
+      documents: [],
+      selectedDocument: null,
+      categories: [],
+      loading: false,
       uploading: false,
-    }));
-  },
+      error: null,
+      currentPage: 1,
+      totalPages: 1,
+      totalCount: 0,
 
-  updateDocument: async (documentId, data) => {
-    set({ loading: true });
+      // ========================================================================
+      // STANDARD CRUD ACTIONS
+      // ========================================================================
 
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 500));
+      fetchDocuments: async (filters = {}) => {
+        set({ loading: true, error: null });
 
-    set((state) => ({
-      documents: state.documents.map((doc) =>
-        doc.id === documentId
-          ? {
-              ...doc,
-              ...data,
-              updatedAt: new Date().toISOString(),
-            }
-          : doc
-      ),
-      loading: false,
-    }));
+        try {
+          const response = await documentApi.list({
+            page: filters.page || 1,
+            page_size: filters.page_size || 50,
+            search: filters.search,
+            status: filters.status,
+            category: filters.category,
+            access_level: filters.access_level,
+            uploaded_by: filters.uploaded_by,
+            is_latest_version: filters.is_latest_version !== undefined ? filters.is_latest_version : true,
+            ordering: filters.ordering || '-upload_date',
+          });
 
-    // Update selected document if it's the one being updated
-    const { selectedDocument } = get();
-    if (selectedDocument?.id === documentId) {
-      set((state) => ({
-        selectedDocument: state.documents.find((doc) => doc.id === documentId) || null,
-      }));
+          set({
+            documents: response.results,
+            loading: false,
+            currentPage: filters.page || 1,
+            totalPages: Math.ceil(response.count / (filters.page_size || 50)),
+            totalCount: response.count,
+          });
+        } catch (error: any) {
+          console.error('Failed to fetch documents:', error);
+          set({
+            error: error.message || 'Failed to fetch documents',
+            loading: false,
+            documents: [],
+          });
+          message.error('Failed to load documents');
+        }
+      },
+
+      fetchDocumentById: async (id: string) => {
+        set({ loading: true, error: null });
+
+        try {
+          const response = await documentApi.retrieve(id);
+
+          set({
+            selectedDocument: response,
+            loading: false,
+          });
+        } catch (error: any) {
+          console.error('Failed to fetch document details:', error);
+          set({
+            error: error.message || 'Failed to fetch document details',
+            loading: false,
+          });
+          message.error('Failed to load document details');
+        }
+      },
+
+      createDocument: async (data: DocumentCreateRequest) => {
+        set({ uploading: true, error: null });
+
+        try {
+          const response = await documentApi.create(data);
+
+          set(state => ({
+            documents: [response, ...state.documents],
+            uploading: false,
+          }));
+
+          message.success(`Document "${response.document_number}" created successfully`);
+          return response;
+        } catch (error: any) {
+          console.error('Failed to create document:', error);
+          set({
+            error: error.message || 'Failed to create document',
+            uploading: false,
+          });
+          message.error('Failed to create document');
+          return null;
+        }
+      },
+
+      updateDocument: async (id: string, data: Partial<DocumentCreateRequest>) => {
+        set({ loading: true, error: null });
+
+        try {
+          const response = await documentApi.partialUpdate(id, data);
+
+          set(state => ({
+            documents: state.documents.map(d =>
+              d.id === id ? response : d
+            ),
+            selectedDocument: state.selectedDocument?.id === id ? response : state.selectedDocument,
+            loading: false,
+          }));
+
+          message.success(`Document "${response.document_number}" updated successfully`);
+          return response;
+        } catch (error: any) {
+          console.error('Failed to update document:', error);
+          set({
+            error: error.message || 'Failed to update document',
+            loading: false,
+          });
+          message.error('Failed to update document');
+          return null;
+        }
+      },
+
+      deleteDocument: async (id: string) => {
+        set({ loading: true, error: null });
+
+        try {
+          await documentApi.delete(id);
+
+          set(state => ({
+            documents: state.documents.filter(d => d.id !== id),
+            loading: false,
+          }));
+
+          message.success('Document deleted successfully');
+          return true;
+        } catch (error: any) {
+          console.error('Failed to delete document:', error);
+          set({
+            error: error.message || 'Failed to delete document',
+            loading: false,
+          });
+          message.error('Failed to delete document');
+          return false;
+        }
+      },
+
+      // ========================================================================
+      // CATEGORY ACTIONS
+      // ========================================================================
+
+      fetchCategories: async () => {
+        set({ loading: true, error: null });
+
+        try {
+          const response = await documentCategoryApi.list();
+
+          set({
+            categories: response.results,
+            loading: false,
+          });
+        } catch (error: any) {
+          console.error('Failed to fetch document categories:', error);
+          set({
+            error: error.message || 'Failed to fetch document categories',
+            loading: false,
+            categories: [],
+          });
+          message.error('Failed to load document categories');
+        }
+      },
+
+      // ========================================================================
+      // UTILITY ACTIONS
+      // ========================================================================
+
+      clearError: () => set({ error: null }),
+
+      clearSelectedDocument: () => set({ selectedDocument: null }),
+    }),
+    {
+      name: 'document-storage',
+      partialize: (state) => ({
+        documents: state.documents,
+        categories: state.categories,
+      }),
     }
-  },
-
-  deleteDocument: async (documentId) => {
-    set({ loading: true });
-
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    set((state) => ({
-      documents: state.documents.filter((doc) => doc.id !== documentId),
-      loading: false,
-      selectedDocument: state.selectedDocument?.id === documentId ? null : state.selectedDocument,
-    }));
-  },
-
-  approveDocument: async (documentId, approverId, approverName) => {
-    set({ loading: true });
-
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    set((state) => ({
-      documents: state.documents.map((doc) =>
-        doc.id === documentId
-          ? {
-              ...doc,
-              status: 'approved' as ApprovalStatus,
-              updatedAt: new Date().toISOString(),
-            }
-          : doc
-      ),
-      loading: false,
-    }));
-
-    // Update selected document if it's the one being approved
-    const { selectedDocument } = get();
-    if (selectedDocument?.id === documentId) {
-      set((state) => ({
-        selectedDocument: state.documents.find((doc) => doc.id === documentId) || null,
-      }));
-    }
-  },
-
-  rejectDocument: async (documentId, approverId, approverName, reason) => {
-    set({ loading: true });
-
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    set((state) => ({
-      documents: state.documents.map((doc) =>
-        doc.id === documentId
-          ? {
-              ...doc,
-              status: 'rejected' as ApprovalStatus,
-              updatedAt: new Date().toISOString(),
-            }
-          : doc
-      ),
-      loading: false,
-    }));
-
-    // Update selected document if it's the one being rejected
-    const { selectedDocument } = get();
-    if (selectedDocument?.id === documentId) {
-      set((state) => ({
-        selectedDocument: state.documents.find((doc) => doc.id === documentId) || null,
-      }));
-    }
-  },
-
-  downloadDocument: (documentId) => {
-    // Increment download count
-    set((state) => ({
-      documents: state.documents.map((doc) =>
-        doc.id === documentId
-          ? {
-              ...doc,
-              downloadCount: doc.downloadCount + 1,
-            }
-          : doc
-      ),
-    }));
-
-    // In a real app, this would trigger actual file download
-    const document = get().documents.find((doc) => doc.id === documentId);
-    if (document) {
-      console.log(`Downloading: ${document.fileName} from ${document.fileUrl}`);
-      // window.open(document.fileUrl, '_blank');
-    }
-  },
-
-  uploadNewVersion: async (documentId, file, userId, userName, changeNotes) => {
-    set({ uploading: true });
-
-    // Simulate file upload API call
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-
-    const document = get().documents.find((doc) => doc.id === documentId);
-    if (!document) {
-      set({ uploading: false });
-      return;
-    }
-
-    const newVersion = document.currentVersion + 1;
-    const mockFileUrl = `/documents/${document.department.toLowerCase()}/v${newVersion}-${file.name}`;
-
-    const newVersionData = {
-      id: `VER${Date.now()}-${newVersion}`,
-      version: newVersion,
-      fileUrl: mockFileUrl,
-      fileSize: file.size,
-      uploadedBy: userId,
-      uploadedByName: userName,
-      uploadedAt: new Date().toISOString(),
-      changeNotes,
-    };
-
-    set((state) => ({
-      documents: state.documents.map((doc) =>
-        doc.id === documentId
-          ? {
-              ...doc,
-              currentVersion: newVersion,
-              fileUrl: mockFileUrl,
-              fileName: file.name,
-              fileSize: file.size,
-              versions: [...doc.versions, newVersionData],
-              updatedAt: new Date().toISOString(),
-              status: 'pending' as ApprovalStatus, // New version requires approval
-            }
-          : doc
-      ),
-      uploading: false,
-    }));
-
-    // Update selected document if it's the one being updated
-    const { selectedDocument } = get();
-    if (selectedDocument?.id === documentId) {
-      set((state) => ({
-        selectedDocument: state.documents.find((doc) => doc.id === documentId) || null,
-      }));
-    }
-  },
-}));
+  )
+);

@@ -28,8 +28,8 @@ import {
 import { isManager } from '../routes/RoleBasedRoute';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../store/authStore';
-import { useNotificationStore } from '../store/notificationStore';
 import { useApprovalStore } from '../store/approvalStore';
+import { NotificationDropdown } from '../components/layout/NotificationDropdown';
 import ewesaccoLogo from '../assets/ewe-sacco-logo.png';
 
 const { Header, Sider, Content } = Layout;
@@ -40,7 +40,6 @@ export const DashboardLayout = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuthStore();
-  const unreadCount = useNotificationStore((state) => state.unreadCount);
   const pendingCount = useApprovalStore((state) => state.pendingCount);
   const {
     token: { colorBgContainer, borderRadiusLG },
@@ -185,6 +184,11 @@ export const DashboardLayout = () => {
             onClick: () => navigate('/hr/leave-calendar'),
           },
           {
+            key: '/hr/leave-balances',
+            label: 'Leave Balances',
+            onClick: () => navigate('/hr/leave-balances'),
+          },
+          {
             key: '/hr/approval-workflows',
             label: 'Approval Workflows',
             onClick: () => navigate('/hr/approval-workflows'),
@@ -245,6 +249,15 @@ export const DashboardLayout = () => {
             key: '/finance/procurement',
             label: 'Procurement',
             onClick: () => navigate('/finance/procurement'),
+          },
+          {
+            type: 'divider',
+          },
+          {
+            key: '/finance/settings',
+            label: 'Finance Settings',
+            icon: <SettingOutlined />,
+            onClick: () => navigate('/finance/settings'),
           },
         ],
       },
@@ -467,20 +480,7 @@ export const DashboardLayout = () => {
           {/* Right Section */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
             {/* Notifications */}
-            <Badge count={unreadCount} offset={[-4, 4]}>
-              <Button
-                type="text"
-                icon={<BellOutlined style={{ fontSize: '20px', color: '#32373c' }} />}
-                onClick={() => navigate('/notifications')}
-                style={{
-                  width: 48,
-                  height: 48,
-                  borderRadius: '8px',
-                  transition: 'all 0.3s',
-                }}
-                className="header-action-btn"
-              />
-            </Badge>
+            <NotificationDropdown />
 
             {/* User Dropdown */}
             <Dropdown menu={{ items: userMenuItems }} placement="bottomRight" trigger={['click']}>

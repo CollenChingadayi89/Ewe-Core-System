@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Button, Avatar, Space, Row, Col, Modal, Form, Input, Select, DatePicker, InputNumber, message, Drawer, Descriptions, Timeline, Typography, Upload, Card, Tabs } from 'antd';
 import {
   PlusOutlined,
@@ -16,6 +16,8 @@ import type { ColumnsType } from 'antd/es/table';
 import { PageHeader, FilterBar, DataTable, StatusTag, StatCard } from '../../components/common';
 import type { Filter } from '../../components/common';
 import { useAuthStore } from '../../store/authStore';
+import { useExpenseStore } from '../../store/expenseStore';
+import dayjs from 'dayjs';
 
 const { TextArea } = Input;
 const { Text } = Typography;
@@ -33,65 +35,6 @@ interface ExpenseRequest {
   receiptUrl?: string;
 }
 
-// Mock expense data
-const mockExpenseRequests: ExpenseRequest[] = [
-  {
-    id: 'EXP-001',
-    description: 'Client meeting lunch',
-    requestedBy: 'Collen Chingadayi',
-    department: 'HR',
-    amount: 5600,
-    category: 'Meals & Entertainment',
-    requestDate: '01/09/2026',
-    status: 'Pending',
-    avatar: 'CC',
-  },
-  {
-    id: 'EXP-002',
-    description: 'Taxi to client site',
-    requestedBy: 'David Kamau',
-    department: 'Finance',
-    amount: 2800,
-    category: 'Transportation',
-    requestDate: '02/09/2026',
-    status: 'Approved',
-    avatar: 'DK',
-  },
-  {
-    id: 'EXP-003',
-    description: 'Office supplies purchase',
-    requestedBy: 'Peter Omondi',
-    department: 'HR',
-    amount: 8400,
-    category: 'Office Supplies',
-    requestDate: '03/09/2026',
-    status: 'Reimbursed',
-    avatar: 'PO',
-  },
-  {
-    id: 'EXP-004',
-    description: 'Software license renewal',
-    requestedBy: 'Michael Otieno',
-    department: 'IT',
-    amount: 42000,
-    category: 'Software & Tools',
-    requestDate: '04/09/2026',
-    status: 'Pending',
-    avatar: 'MO',
-  },
-  {
-    id: 'EXP-005',
-    description: 'Conference registration fee',
-    requestedBy: 'Sarah Wambui',
-    department: 'Operations',
-    amount: 28000,
-    category: 'Training & Development',
-    requestDate: '05/09/2026',
-    status: 'Approved',
-    avatar: 'SW',
-  },
-];
-
 export const ExpensesPage = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
@@ -103,27 +46,62 @@ export const ExpensesPage = () => {
   const [form] = Form.useForm();
   const { user } = useAuthStore();
 
+  // Zustand store
+  const {
+    expenses,
+    loading,
+    error,
+    fetchExpenses,
+    createExpense,
+    deleteExpense,
+  } = useExpenseStore();
+
+  // Fetch expenses on mount
+  useEffect(() => {
+    fetchExpenses();
+  }, [fetchExpenses]);
+
+  // Map API expenses to component format
+  const mapApiExpenseToComponent = (apiExpense: any): ExpenseRequest => ({
+    id: apiExpense.expense_number || apiExpense.id,
+    description: apiExpense.description,
+    requestedBy: apiExpense.employee_name || 'Unknown',
+    department: apiExpense.employee_department || 'N/A',
+    amount: parseFloat(apiExpense.amount) || 0,
+    category: apiExpense.category_display || apiExpense.category || 'Other',
+    requestDate: apiExpense.expense_date ? dayjs(apiExpense.expense_date).format('DD/MM/YYYY') : '',
+    status: apiExpense.status_display || apiExpense.status || 'Pending',
+    avatar: (apiExpense.employee_name || 'U')
+      .split(' ')
+      .map((n: string) => n[0])
+      .join('')
+      .toUpperCase(),
+    receiptUrl: apiExpense.receipt_url,
+  });
+
+  const mappedExpenses = expenses.map(mapApiExpenseToComponent);
+
   // Calculate statistics
-  const totalRequests = mockExpenseRequests.length;
-  const pendingAmount = mockExpenseRequests
+  const totalRequests = mappedExpenses.length;
+  const pendingAmount = mappedExpenses
     .filter((r) => r.status === 'Pending')
     .reduce((sum, r) => sum + r.amount, 0);
-  const approvedAmount = mockExpenseRequests
+  const approvedAmount = mappedExpenses
     .filter((r) => r.status === 'Approved')
     .reduce((sum, r) => sum + r.amount, 0);
-  const reimbursedAmount = mockExpenseRequests
-    .filter((r) => r.status === 'Reimbursed')
+  const reimbursedAmount = mappedExpenses
+    .filter((r) => r.status === 'Reimbursed' || r.status === 'Paid')
     .reduce((sum, r) => sum + r.amount, 0);
 
   // My expenses (for the logged-in user)
-  const myExpenses = mockExpenseRequests.filter((req) => req.requestedBy === user?.name);
+  const myExpenses = mappedExpenses.filter((req) => req.requestedBy === user?.name);
 
   // Filter expense requests based on active tab
   const getFilteredByTab = () => {
     if (activeTab === 'my-expenses') {
       return myExpenses;
     }
-    return mockExpenseRequests;
+    return mappedExpenses;
   };
 
   // Apply search and filter
@@ -141,12 +119,23 @@ export const ExpensesPage = () => {
   // Handle request submission
   const handleSubmitRequest = async (values: any) => {
     try {
-      console.log('Expense request:', values);
-      message.success('Expense reimbursement request submitted successfully!');
-      setRequestModalVisible(false);
-      form.resetFields();
+      const result = await createExpense({
+        category: values.category,
+        description: values.description,
+        amount: values.amount,
+        expense_date: values.expenseDate.format('YYYY-MM-DD'),
+        justification: values.justification,
+        priority: values.priority || 'medium',
+        payment_method: values.paymentMethod,
+        // receipt: values.receipt, // TODO: Handle file upload separately
+      });
+
+      if (result) {
+        setRequestModalVisible(false);
+        form.resetFields();
+      }
     } catch (error) {
-      message.error('Failed to submit request');
+      console.error('Failed to submit expense request:', error);
     }
   };
 

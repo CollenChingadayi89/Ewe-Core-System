@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Row, Col, Button, Card, Avatar, Typography, Space, Modal, Form, Input, Select, Divider, Tag } from 'antd';
+import { useState, useEffect } from 'react';
+import { Row, Col, Button, Card, Avatar, Typography, Space, Modal, Form, Input, Select, Divider, Tag, Spin, Alert, message } from 'antd';
 import {
   PlusOutlined,
   TeamOutlined,
@@ -12,8 +12,25 @@ import {
 } from '@ant-design/icons';
 import { PageHeader, FilterBar, StatCard } from '../../components/common';
 import type { Filter } from '../../components/common';
-import { mockDepartments, mockEmployees, getEmployeeById } from '../../mock/employees';
-import type { Department } from '../../types';
+import employeeApiService from '../../services/api/employeeApi';
+import type { EmployeeListItem } from '../../types/employee';
+
+// Department type (matching API response from DepartmentListSerializer)
+interface DepartmentListItem {
+  id: string;
+  code: string;
+  name: string;
+  description?: string;
+  manager: string | null; // Manager UUID (matches API field name)
+  manager_name?: string; // Manager full name (from API)
+  parent_department?: string | null; // Parent department UUID (matches API field name)
+  parent_department_name?: string; // Parent department name (from API)
+  employee_count: number; // Matches API snake_case
+  sub_department_count?: number; // Matches API snake_case
+  is_active: boolean; // Matches API snake_case
+  created_at?: string;
+  updated_at?: string;
+}
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -22,26 +39,80 @@ export const DepartmentsPage = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [viewMode, setViewMode] = useState<'grid' | 'hierarchy'>('grid');
   const [isModalVisible, setIsModalVisible] = useState(false);
-  const [editingDepartment, setEditingDepartment] = useState<Department | null>(null);
+  const [editingDepartment, setEditingDepartment] = useState<DepartmentListItem | null>(null);
   const [form] = Form.useForm();
 
+  // Local state for departments (no Zustand)
+  const [departments, setDepartments] = useState<DepartmentListItem[]>([]);
+  const [deptsLoading, setDeptsLoading] = useState(false);
+  const [deptsError, setDeptsError] = useState<string | null>(null);
+
+  // Local state for employees (no Zustand)
+  const [employees, setEmployees] = useState<EmployeeListItem[]>([]);
+  const [empsLoading, setEmpsLoading] = useState(false);
+
+  // Fetch departments directly
+  const fetchDepartmentsData = async () => {
+    setDeptsLoading(true);
+    setDeptsError(null);
+    try {
+      const response = await employeeApiService.departments.list({ is_active: true, ordering: 'name', page_size: 1000 });
+      setDepartments(response.results as DepartmentListItem[]);
+    } catch (error: any) {
+      console.error('Failed to fetch departments:', error);
+      setDeptsError(error.response?.data?.message || 'Failed to load departments');
+    } finally {
+      setDeptsLoading(false);
+    }
+  };
+
+  // Fetch all employees (not just managers) for manager dropdown
+  const fetchEmployeesData = async () => {
+    setEmpsLoading(true);
+    try {
+      // Fetch all active employees without role filtering
+      const response = await employeeApiService.employees.list({
+        is_active: true,
+        page_size: 1000,
+        ordering: 'first_name'
+      });
+      setEmployees(response.results);
+    } catch (error) {
+      console.error('Failed to fetch employees:', error);
+    } finally {
+      setEmpsLoading(false);
+    }
+  };
+
+  // Fetch data on mount
+  useEffect(() => {
+    fetchDepartmentsData();
+    fetchEmployeesData();
+  }, []);
+
   // Calculate statistics
-  const totalDepartments = mockDepartments.length;
-  const totalEmployees = mockEmployees.length;
-  const avgEmployeesPerDept = Math.round(totalEmployees / totalDepartments);
-  const topDepartments = [...mockDepartments].sort((a, b) => b.employeeCount - a.employeeCount);
+  const totalDepartments = departments.length;
+  const totalEmployees = departments.reduce((sum, dept) => sum + dept.employee_count, 0);
+  const avgEmployeesPerDept = totalDepartments > 0 ? Math.round(totalEmployees / totalDepartments) : 0;
+  const topDepartments = [...departments].sort((a, b) => b.employee_count - a.employee_count);
 
   // Filter departments based on search
-  const filteredDepartments = mockDepartments.filter((dept) => {
+  const filteredDepartments = departments.filter((dept) => {
     const matchesSearch = dept.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       dept.description?.toLowerCase().includes(searchTerm.toLowerCase());
     return matchesSearch;
   });
 
   // Get department hierarchy
-  const rootDepartments = filteredDepartments.filter(dept => !dept.parentId);
+  const rootDepartments = filteredDepartments.filter(dept => !dept.parent_department);
   const getChildDepartments = (parentId: string) => {
-    return filteredDepartments.filter(dept => dept.parentId === parentId);
+    return filteredDepartments.filter(dept => dept.parent_department === parentId);
+  };
+
+  // Get employee by ID
+  const getEmployeeById = (id: string | null) => {
+    if (!id) return null;
+    return employees.find(emp => emp.id === id);
   };
 
   const filters: Filter[] = [
@@ -58,30 +129,74 @@ export const DepartmentsPage = () => {
     setSearchTerm('');
   };
 
+  // Generate department code
+  const generateDepartmentCode = () => {
+    // Generate code based on department count: DEPT-001, DEPT-002, etc.
+    const nextNumber = (departments.length + 1).toString().padStart(3, '0');
+    return `DEPT-${nextNumber}`;
+  };
+
   const handleAddDepartment = () => {
     setEditingDepartment(null);
     form.resetFields();
+    // Auto-generate department code for new departments
+    form.setFieldsValue({
+      code: generateDepartmentCode(),
+    });
     setIsModalVisible(true);
   };
 
-  const handleEditDepartment = (dept: Department) => {
+  const handleEditDepartment = (dept: DepartmentListItem) => {
     setEditingDepartment(dept);
     form.setFieldsValue({
+      code: dept.code,
       name: dept.name,
       description: dept.description,
-      managerId: dept.managerId,
-      parentId: dept.parentId,
+      managerId: dept.manager,
+      parentId: dept.parent_department,
     });
     setIsModalVisible(true);
   };
 
-  const handleModalOk = () => {
-    form.validateFields().then((values) => {
-      console.log('Department form values:', values);
-      // In a real app, this would call an API to save the department
-      setIsModalVisible(false);
-      form.resetFields();
-    });
+  const handleModalOk = async () => {
+    try {
+      const values = await form.validateFields();
+
+      const departmentData = {
+        code: values.code,
+        name: values.name,
+        description: values.description,
+        manager: values.managerId || null,
+        parent_department: values.parentId || null,
+        is_active: true,
+      };
+
+      setDeptsLoading(true);
+      setDeptsError(null);
+
+      if (editingDepartment) {
+        // Update existing department
+        await employeeApiService.departments.update(editingDepartment.id, departmentData);
+        message.success('Department updated successfully');
+        setIsModalVisible(false);
+        form.resetFields();
+        setEditingDepartment(null);
+        await fetchDepartmentsData(); // Refresh list
+      } else {
+        // Create new department
+        await employeeApiService.departments.create(departmentData);
+        message.success('Department created successfully');
+        setIsModalVisible(false);
+        form.resetFields();
+        await fetchDepartmentsData(); // Refresh list
+      }
+    } catch (error: any) {
+      console.error('Failed to save department:', error);
+      const errorMsg = error.response?.data?.message || error.response?.data?.detail || 'Failed to save department';
+      message.error(errorMsg);
+    } finally {
+      setDeptsLoading(false);
+    }
   };
 
   const handleModalCancel = () => {
@@ -90,22 +205,32 @@ export const DepartmentsPage = () => {
     setEditingDepartment(null);
   };
 
-  const handleDeleteDepartment = (dept: Department) => {
+  const handleDeleteDepartment = (dept: DepartmentListItem) => {
     Modal.confirm({
       title: 'Delete Department',
       content: `Are you sure you want to delete ${dept.name}? This action cannot be undone.`,
       okText: 'Delete',
       okType: 'danger',
       cancelText: 'Cancel',
-      onOk: () => {
-        console.log('Deleting department:', dept.id);
-        // In a real app, this would call an API to delete the department
+      onOk: async () => {
+        try {
+          setDeptsLoading(true);
+          await employeeApiService.departments.delete(dept.id);
+          message.success('Department deleted successfully');
+          await fetchDepartmentsData(); // Refresh list
+        } catch (error: any) {
+          console.error('Failed to delete department:', error);
+          const errorMsg = error.response?.data?.message || error.response?.data?.detail || 'Failed to delete department';
+          message.error(errorMsg);
+        } finally {
+          setDeptsLoading(false);
+        }
       },
     });
   };
 
-  const DepartmentCard = ({ dept }: { dept: Department }) => {
-    const manager = getEmployeeById(dept.managerId);
+  const DepartmentCard = ({ dept }: { dept: DepartmentListItem }) => {
+    const manager = getEmployeeById(dept.manager);
     const childDepartments = getChildDepartments(dept.id);
 
     return (
@@ -209,15 +334,17 @@ export const DepartmentsPage = () => {
                     display: 'block',
                   }}
                 >
-                  {manager.name}
+                  {manager.first_name} {manager.last_name}
                 </Text>
                 <Text style={{ fontSize: '12px', color: '#8c8c8c' }}>
-                  {manager.position}
+                  {manager.designation_title}
                 </Text>
               </div>
             </div>
           ) : (
-            <Text style={{ color: '#8c8c8c', fontSize: '13px' }}>No manager assigned</Text>
+            <Text style={{ color: '#8c8c8c', fontSize: '13px' }}>
+              {dept.manager_name || 'No manager assigned'}
+            </Text>
           )}
         </div>
 
@@ -238,7 +365,7 @@ export const DepartmentsPage = () => {
               <Text style={{ fontSize: '12px', color: '#8c8c8c' }}>Employees</Text>
             </div>
             <Text style={{ fontSize: '20px', fontWeight: 600, color: '#32373c' }}>
-              {dept.employeeCount}
+              {dept.employee_count}
             </Text>
           </div>
           <div>
@@ -247,13 +374,13 @@ export const DepartmentsPage = () => {
               <Text style={{ fontSize: '12px', color: '#8c8c8c' }}>Sub-Depts</Text>
             </div>
             <Text style={{ fontSize: '20px', fontWeight: 600, color: '#32373c' }}>
-              {childDepartments.length}
+              {dept.sub_department_count || childDepartments.length}
             </Text>
           </div>
         </div>
 
         {/* Parent Department Tag */}
-        {dept.parentId && (
+        {dept.parent_department && (
           <div style={{ marginTop: '12px' }}>
             <Tag
               style={{
@@ -265,7 +392,7 @@ export const DepartmentsPage = () => {
                 fontSize: '11px',
               }}
             >
-              Under {mockDepartments.find(d => d.id === dept.parentId)?.name}
+              Under {dept.parent_department_name || departments.find(d => d.id === dept.parent_department)?.name}
             </Tag>
           </div>
         )}
@@ -273,8 +400,8 @@ export const DepartmentsPage = () => {
     );
   };
 
-  const HierarchyNode = ({ dept, level = 0 }: { dept: Department; level?: number }) => {
-    const manager = getEmployeeById(dept.managerId);
+  const HierarchyNode = ({ dept, level = 0 }: { dept: DepartmentListItem; level?: number }) => {
+    const manager = getEmployeeById(dept.manager);
     const children = getChildDepartments(dept.id);
 
     return (
@@ -314,11 +441,11 @@ export const DepartmentsPage = () => {
                     {dept.name}
                   </Title>
                   <Tag color="blue" style={{ fontSize: '11px' }}>
-                    {dept.employeeCount} employees
+                    {dept.employee_count} employees
                   </Tag>
                 </div>
                 <Text style={{ color: '#8c8c8c', fontSize: '12px', display: 'block', marginTop: '4px' }}>
-                  {manager ? `Managed by ${manager.name}` : 'No manager assigned'}
+                  {manager ? `Managed by ${manager.first_name} ${manager.last_name}` : dept.manager_name ? `Managed by ${dept.manager_name}` : 'No manager assigned'}
                 </Text>
               </div>
             </div>
@@ -345,6 +472,34 @@ export const DepartmentsPage = () => {
       </div>
     );
   };
+
+  // Loading state
+  if (deptsLoading && departments.length === 0) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '400px' }}>
+        <Spin size="large" tip="Loading departments..." />
+      </div>
+    );
+  }
+
+  // Error state
+  if (deptsError) {
+    return (
+      <div style={{ padding: '20px' }}>
+        <Alert
+          message="Failed to Load Departments"
+          description={deptsError}
+          type="error"
+          showIcon
+          action={
+            <Button onClick={() => { setDeptsError(null); fetchDepartmentsData(); }}>
+              Retry
+            </Button>
+          }
+        />
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -418,7 +573,7 @@ export const DepartmentsPage = () => {
           <StatCard
             title="Largest Department"
             value={topDepartments[0]?.name.split(' ')[0] || 'N/A'}
-            suffix={`(${topDepartments[0]?.employeeCount || 0})`}
+            suffix={`(${topDepartments[0]?.employee_count || 0})`}
             icon={<ApartmentOutlined />}
             iconBg="rgba(155, 81, 224, 0.1)"
             style={{ borderLeft: '4px solid #9b51e0' }}
@@ -502,6 +657,7 @@ export const DepartmentsPage = () => {
         width={600}
         okText={editingDepartment ? 'Update' : 'Create'}
         cancelText="Cancel"
+        confirmLoading={deptsLoading}
         okButtonProps={{
           style: {
             background: 'linear-gradient(135deg, #00d084 0%, #00BFA5 100%)',
@@ -523,6 +679,19 @@ export const DepartmentsPage = () => {
             parentId: undefined,
           }}
         >
+          <Form.Item
+            name="code"
+            label="Department Code"
+            rules={[{ required: true, message: 'Please enter department code' }]}
+            tooltip={!editingDepartment ? "Auto-generated code (you can modify if needed)" : undefined}
+          >
+            <Input
+              placeholder="e.g., DEPT-001, HR, FIN, IT"
+              style={{ borderRadius: '8px' }}
+              size="large"
+            />
+          </Form.Item>
+
           <Form.Item
             name="name"
             label="Department Name"
@@ -550,20 +719,24 @@ export const DepartmentsPage = () => {
           <Form.Item
             name="managerId"
             label="Department Manager"
-            rules={[{ required: true, message: 'Please select a manager' }]}
+            tooltip="Search and select any employee to be the department manager"
           >
             <Select
-              placeholder="Select manager"
+              placeholder="Search and select manager..."
               style={{ borderRadius: '8px' }}
               size="large"
               showSearch
-              optionFilterProp="children"
-              options={mockEmployees
-                .filter(emp => ['manager', 'hr_manager', 'finance_manager', 'ceo'].includes(emp.role))
-                .map(emp => ({
-                  label: `${emp.name} - ${emp.position}`,
-                  value: emp.id,
-                }))}
+              allowClear
+              loading={empsLoading}
+              filterOption={(input, option) => {
+                const label = option?.label?.toString().toLowerCase() || '';
+                return label.includes(input.toLowerCase());
+              }}
+              options={employees.map(emp => ({
+                label: `${emp.first_name} ${emp.last_name} - ${emp.designation_title} (${emp.department_name})`,
+                value: emp.id,
+              }))}
+              notFoundContent={empsLoading ? <Spin size="small" /> : 'No employees found'}
             />
           </Form.Item>
 
@@ -576,7 +749,7 @@ export const DepartmentsPage = () => {
               style={{ borderRadius: '8px' }}
               size="large"
               allowClear
-              options={mockDepartments
+              options={departments
                 .filter(dept => !editingDepartment || dept.id !== editingDepartment.id)
                 .map(dept => ({
                   label: dept.name,

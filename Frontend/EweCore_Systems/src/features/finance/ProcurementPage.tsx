@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Button, Avatar, Space, Row, Col, Tag, Modal, Form, Input, Select, DatePicker, InputNumber, message, Drawer, Descriptions, Card, Typography, Table } from 'antd';
 import {
   PlusOutlined,
@@ -17,8 +17,10 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { PageHeader, FilterBar, DataTable, StatusTag, StatCard } from '../../components/common';
 import type { Filter } from '../../components/common';
-import { mockProcurementRequests, procurementCategories, procurementStats } from '../../mock/procurement';
+import { procurementCategories, procurementStats } from '../../mock/procurement';
 import type { ProcurementRequest } from '../../mock/procurement';
+import { useProcurementStore } from '../../store/procurementStore';
+import dayjs from 'dayjs';
 
 const { TextArea } = Input;
 const { Text, Title } = Typography;
@@ -42,8 +44,45 @@ export const ProcurementPage = () => {
   const [selectedRequest, setSelectedRequest] = useState<ProcurementRequest | null>(null);
   const [form] = Form.useForm();
 
+  // Zustand store
+  const {
+    procurementRequests,
+    loading,
+    error,
+    fetchRequests,
+    createRequest,
+    deleteRequest,
+  } = useProcurementStore();
+
+  // Fetch procurement requests on mount
+  useEffect(() => {
+    fetchRequests();
+  }, [fetchRequests]);
+
+  // Map API procurement to component format
+  const mapApiProcurementToComponent = (apiProcurement: any): ProcurementRequest => ({
+    id: apiProcurement.request_number || apiProcurement.id,
+    itemDescription: apiProcurement.description || apiProcurement.item_description || 'N/A',
+    requestedBy: apiProcurement.employee_name || apiProcurement.requested_by_name || 'Unknown',
+    department: apiProcurement.employee_department || apiProcurement.department_name || 'N/A',
+    category: apiProcurement.category_display || apiProcurement.category || 'Other',
+    quantity: apiProcurement.quantity || 1,
+    estimatedCost: parseFloat(apiProcurement.estimated_total_cost || apiProcurement.amount) || 0,
+    requestedDate: apiProcurement.request_date ? dayjs(apiProcurement.request_date).format('DD/MM/YYYY') : '',
+    requiredByDate: apiProcurement.required_by_date ? dayjs(apiProcurement.required_by_date).format('DD/MM/YYYY') : '',
+    status: apiProcurement.status_display || apiProcurement.status || 'Pending',
+    vendor: apiProcurement.preferred_vendor || undefined,
+    avatar: (apiProcurement.employee_name || apiProcurement.requested_by_name || 'U')
+      .split(' ')
+      .map((n: string) => n[0])
+      .join('')
+      .toUpperCase(),
+  });
+
+  const mappedRequests = procurementRequests.map(mapApiProcurementToComponent);
+
   // Filter procurement requests
-  const filteredRequests = mockProcurementRequests.filter((request) => {
+  const filteredRequests = mappedRequests.filter((request) => {
     const matchesSearch =
       request.itemDescription.toLowerCase().includes(searchTerm.toLowerCase()) ||
       request.requestedBy.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -138,12 +177,25 @@ export const ProcurementPage = () => {
   // Handle request submission
   const handleSubmitRequest = async (values: any) => {
     try {
-      console.log('Procurement request:', values);
-      message.success('Procurement request submitted successfully!');
-      setRequestModalVisible(false);
-      form.resetFields();
+      const result = await createRequest({
+        category: values.category,
+        item_description: values.itemDescription,
+        description: values.justification,
+        quantity: values.quantity,
+        estimated_unit_cost: values.estimatedUnitCost,
+        estimated_total_cost: values.quantity * values.estimatedUnitCost,
+        request_date: values.requestDate.format('YYYY-MM-DD'),
+        required_by_date: values.requiredByDate.format('YYYY-MM-DD'),
+        preferred_vendor: values.preferredVendor,
+        priority: values.priority || 'medium',
+      });
+
+      if (result) {
+        setRequestModalVisible(false);
+        form.resetFields();
+      }
     } catch (error) {
-      message.error('Failed to submit request');
+      console.error('Failed to submit procurement request:', error);
     }
   };
 

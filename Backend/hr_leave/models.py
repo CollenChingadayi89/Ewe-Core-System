@@ -75,6 +75,17 @@ class LeavePolicy(BaseModel):
     requires_minimum_service = models.BooleanField(default=False, verbose_name='Requires Minimum Service')
     minimum_service_days = models.IntegerField(default=0, verbose_name='Minimum Service Days')
     available_during_probation = models.BooleanField(default=False, verbose_name='Available During Probation')
+    gender_restriction = models.CharField(
+        max_length=10,
+        choices=[
+            ('male', 'Male Only'),
+            ('female', 'Female Only'),
+            ('none', 'No Restriction')
+        ],
+        default='none',
+        verbose_name='Gender Restriction',
+        help_text='Restrict this leave type by employee gender'
+    )
 
     # Documentation
     requires_documentation = models.BooleanField(default=False, verbose_name='Requires Documentation')
@@ -302,6 +313,20 @@ class LeaveRequest(BaseModel):
         help_text='URLs to supporting documents'
     )
     handover_notes = models.TextField(blank=True, null=True, verbose_name='Handover Notes')
+    address_during_leave = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        verbose_name='Address During Leave',
+        help_text='Where the employee can be reached during leave'
+    )
+    contact_during_leave = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        verbose_name='Contact Number During Leave',
+        help_text='Phone number where employee can be reached'
+    )
 
     # Emergency/Documentation
     is_emergency_leave = models.BooleanField(
@@ -470,3 +495,211 @@ class WorkingHours(models.Model):
             self.saturday_working,
             self.sunday_working
         ])
+
+
+class LeaveYearConfig(TimestampedModel):
+    """
+    System-wide leave year configuration (Singleton model).
+    Controls how leave years are calculated and balanced.
+    """
+    LEAVE_YEAR_CHOICES = [
+        ('calendar', 'Calendar Year (Jan 1 - Dec 31)'),
+        ('financial', 'Financial Year (Configurable Start Date)'),
+        ('anniversary', 'Anniversary-based (Per Employee)'),
+    ]
+
+    leave_year_type = models.CharField(
+        max_length=20,
+        choices=LEAVE_YEAR_CHOICES,
+        default='financial',
+        verbose_name='Leave Year Type',
+        help_text='How leave years are calculated'
+    )
+
+    financial_year_start = models.CharField(
+        max_length=5,
+        default='04-01',
+        verbose_name='Financial Year Start Date',
+        help_text='MM-DD format (e.g., 04-01 for April 1st)'
+    )
+
+    auto_carry_forward = models.BooleanField(
+        default=True,
+        verbose_name='Auto Carry Forward',
+        help_text='Automatically carry forward unused leave at year end'
+    )
+
+    allow_negative_balance = models.BooleanField(
+        default=False,
+        verbose_name='Allow Negative Balance',
+        help_text='Allow employees to take leave in advance'
+    )
+
+    max_negative_balance_days = models.IntegerField(
+        default=0,
+        verbose_name='Maximum Negative Balance Days',
+        help_text='Maximum days an employee can go into negative balance'
+    )
+
+    class Meta:
+        db_table = 'hr_leave_year_config'
+        verbose_name = 'Leave Year Configuration'
+        verbose_name_plural = 'Leave Year Configuration'
+
+    def __str__(self):
+        return f"Leave Year Configuration ({self.get_leave_year_type_display()})"
+
+    def save(self, *args, **kwargs):
+        # Enforce singleton pattern
+        if not self.pk and LeaveYearConfig.objects.exists():
+            # Update existing instance instead of creating new one
+            existing = LeaveYearConfig.objects.first()
+            self.pk = existing.pk
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def get_config(cls):
+        """Get or create the singleton configuration"""
+        config, created = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                'leave_year_type': 'financial',
+                'financial_year_start': '04-01',
+                'auto_carry_forward': True,
+                'allow_negative_balance': False,
+                'max_negative_balance_days': 0,
+            }
+        )
+        return config
+
+
+class LeaveNotificationSettings(TimestampedModel):
+    """
+    System-wide notification preferences for leave management (Singleton).
+    Controls when and how notifications are sent.
+    """
+    notify_on_submission = models.BooleanField(
+        default=True,
+        verbose_name='Notify on Submission',
+        help_text='Send notification when employee submits leave request'
+    )
+
+    notify_on_approval = models.BooleanField(
+        default=True,
+        verbose_name='Notify on Approval',
+        help_text='Send notification when leave request is approved'
+    )
+
+    notify_on_rejection = models.BooleanField(
+        default=True,
+        verbose_name='Notify on Rejection',
+        help_text='Send notification when leave request is rejected'
+    )
+
+    reminder_days_before_leave = models.IntegerField(
+        default=3,
+        verbose_name='Reminder Days Before Leave',
+        help_text='Send reminder X days before leave starts'
+    )
+
+    class Meta:
+        db_table = 'hr_leave_notification_settings'
+        verbose_name = 'Leave Notification Settings'
+        verbose_name_plural = 'Leave Notification Settings'
+
+    def __str__(self):
+        return "Leave Notification Settings"
+
+    def save(self, *args, **kwargs):
+        # Enforce singleton pattern
+        if not self.pk and LeaveNotificationSettings.objects.exists():
+            existing = LeaveNotificationSettings.objects.first()
+            self.pk = existing.pk
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def get_settings(cls):
+        """Get or create the singleton settings"""
+        settings, created = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                'notify_on_submission': True,
+                'notify_on_approval': True,
+                'notify_on_rejection': True,
+                'reminder_days_before_leave': 3,
+            }
+        )
+        return settings
+
+
+class LeaveCalendarSettings(TimestampedModel):
+    """
+    System-wide calendar display preferences (Singleton).
+    Controls how the leave calendar is displayed.
+    """
+    DEFAULT_VIEW_CHOICES = [
+        ('month', 'Month View'),
+        ('week', 'Week View'),
+        ('day', 'Day View'),
+    ]
+
+    WEEK_START_CHOICES = [
+        (0, 'Sunday'),
+        (1, 'Monday'),
+    ]
+
+    default_view = models.CharField(
+        max_length=10,
+        choices=DEFAULT_VIEW_CHOICES,
+        default='month',
+        verbose_name='Default Calendar View',
+        help_text='Default view when opening calendar'
+    )
+
+    week_starts_on = models.IntegerField(
+        choices=WEEK_START_CHOICES,
+        default=1,
+        verbose_name='Week Starts On',
+        help_text='First day of the week (0=Sunday, 1=Monday)'
+    )
+
+    show_weekends_on_calendar = models.BooleanField(
+        default=True,
+        verbose_name='Show Weekends',
+        help_text='Display weekends on the calendar'
+    )
+
+    highlight_public_holidays = models.BooleanField(
+        default=True,
+        verbose_name='Highlight Public Holidays',
+        help_text='Highlight public holidays on the calendar'
+    )
+
+    class Meta:
+        db_table = 'hr_leave_calendar_settings'
+        verbose_name = 'Leave Calendar Settings'
+        verbose_name_plural = 'Leave Calendar Settings'
+
+    def __str__(self):
+        return "Leave Calendar Settings"
+
+    def save(self, *args, **kwargs):
+        # Enforce singleton pattern
+        if not self.pk and LeaveCalendarSettings.objects.exists():
+            existing = LeaveCalendarSettings.objects.first()
+            self.pk = existing.pk
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def get_settings(cls):
+        """Get or create the singleton settings"""
+        settings, created = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                'default_view': 'month',
+                'week_starts_on': 1,
+                'show_weekends_on_calendar': True,
+                'highlight_public_holidays': True,
+            }
+        )
+        return settings

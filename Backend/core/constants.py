@@ -104,7 +104,10 @@ class ReceivableStatus:
         (REJECTED, 'Rejected'),
     ]
 
-CURRENCY_CHOICES = [('ZWG', 'ZWG - Zimbabwe Gold')]
+CURRENCY_CHOICES = [
+    ('ZWG', 'ZWG - Zimbabwe Gold'),
+    ('USD', 'USD - United States Dollar')
+]
 
 PRIORITY_CHOICES = [('low', 'Low'), ('medium', 'Medium'), ('high', 'High')]
 

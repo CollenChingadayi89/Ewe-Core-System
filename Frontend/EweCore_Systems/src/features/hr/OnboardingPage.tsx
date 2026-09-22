@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Row, Col, Button, Avatar, Progress, Space, Tooltip, Tag, Tabs, Modal, Form, Input, Select, DatePicker, message } from 'antd';
 import {
   PlusOutlined,
@@ -15,14 +15,28 @@ import { useNavigate } from 'react-router-dom';
 import type { ColumnsType } from 'antd/es/table';
 import { PageHeader, StatCard, StatusTag, DataTable, FilterBar } from '../../components/common';
 import type { Filter } from '../../components/common';
-import {
-  mockOnboardingCandidates,
-  getOnboardingStatistics,
-  stageConfig,
-  type OnboardingCandidate,
-  type OnboardingStage,
-  type OnboardingStatus,
-} from '../../mock/onboarding';
+import { useOnboardingStore } from '../../store/onboardingStore';
+import { stageConfig } from '../../mock/onboarding';
+import dayjs from 'dayjs';
+
+// Legacy types for component compatibility
+type OnboardingStage = 'Document Collection' | 'IT Setup' | 'Training' | 'Department Onboarding' | 'Probation' | 'Completed';
+type OnboardingStatus = 'Not Started' | 'On Track' | 'Delayed' | 'Completed';
+
+interface OnboardingCandidate {
+  id: string;
+  candidateId: string;
+  name: string;
+  position: string;
+  department: string;
+  stage: OnboardingStage;
+  status: OnboardingStatus;
+  progress: number;
+  startDate: string;
+  expectedCompletion: string;
+  buddy?: string;
+  avatarColor?: string;
+}
 
 const { TabPane } = Tabs;
 const { TextArea } = Input;
@@ -38,11 +52,70 @@ export const OnboardingPage = () => {
   const [enrollModalVisible, setEnrollModalVisible] = useState(false);
   const [form] = Form.useForm();
 
-  // Get statistics
-  const stats = getOnboardingStatistics();
+  // Zustand store
+  const {
+    onboardings,
+    statistics,
+    loading,
+    fetchOnboardings,
+    fetchStatistics,
+    createOnboarding,
+  } = useOnboardingStore();
+
+  // Fetch onboarding data on mount
+  useEffect(() => {
+    fetchOnboardings();
+    fetchStatistics();
+  }, [fetchOnboardings, fetchStatistics]);
+
+  // Map API data to component format
+  const mapApiOnboardingToComponent = (apiData: any): OnboardingCandidate => {
+    // Map status from API to component format
+    const getComponentStatus = (status: string): OnboardingStatus => {
+      if (status === 'completed') return 'Completed';
+      if (status === 'in_progress') return 'On Track';
+      if (status === 'on_hold') return 'Delayed';
+      return 'Not Started';
+    };
+
+    // Determine stage based on completion percentage
+    const getStage = (percentage: number): OnboardingStage => {
+      if (percentage === 100) return 'Completed';
+      if (percentage >= 80) return 'Probation';
+      if (percentage >= 60) return 'Department Onboarding';
+      if (percentage >= 40) return 'Training';
+      if (percentage >= 20) return 'IT Setup';
+      return 'Document Collection';
+    };
+
+    return {
+      id: apiData.id,
+      candidateId: apiData.onboarding_number,
+      name: apiData.employee_name,
+      position: apiData.employee_department, // Using department as position placeholder
+      department: apiData.employee_department,
+      stage: getStage(apiData.completion_percentage),
+      status: getComponentStatus(apiData.status),
+      progress: apiData.completion_percentage,
+      startDate: dayjs(apiData.start_date).format('DD/MM/YYYY'),
+      expectedCompletion: dayjs(apiData.expected_completion_date).format('DD/MM/YYYY'),
+      buddy: apiData.assigned_buddy_name || undefined,
+      avatarColor: undefined,
+    };
+  };
+
+  const mappedOnboardings = onboardings.map(mapApiOnboardingToComponent);
+
+  // Get statistics with fallbacks
+  const stats = {
+    totalCandidates: statistics?.total_onboardings || mappedOnboardings.length,
+    activeOnboarding: statistics?.in_progress || mappedOnboardings.filter(c => c.status === 'On Track' || c.status === 'Delayed').length,
+    completed: statistics?.completed || mappedOnboardings.filter(c => c.status === 'Completed').length,
+    averageCompletion: statistics?.average_completion_percentage || 0,
+  };
 
   // Filter candidates based on search and filters
-  const filteredCandidates = mockOnboardingCandidates.filter((candidate) => {
+  const filteredCandidates = mappedOnboardings.filter((candidate) => {
     const matchesSearch =
       candidate.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       candidate.candidateId.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -498,7 +571,7 @@ export const OnboardingPage = () => {
               key: 'all',
               label: (
                 <span style={{ fontWeight: 500 }}>
-                  All Candidates ({mockOnboardingCandidates.length})
+                  All Candidates ({mappedOnboardings.length})
                 </span>
               ),
             },
@@ -591,7 +664,7 @@ export const OnboardingPage = () => {
           }}
         >
           {Object.entries(stageConfig).map(([stage, config], index) => {
-            const count = mockOnboardingCandidates.filter((c) => c.stage === stage).length;
+            const count = mappedOnboardings.filter((c) => c.stage === stage).length;
             return (
               <div
                 key={stage}
