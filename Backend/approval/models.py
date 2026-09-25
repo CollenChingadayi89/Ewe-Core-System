@@ -499,9 +499,11 @@ class ApprovalStep(models.Model):
     action_type = models.CharField(
         max_length=20,
         choices=[
+            ('verify', 'Verify'),
             ('certify', 'Certify'),
             ('recommend', 'Recommend'),
             ('approve', 'Approve'),
+            ('pay', 'Pay'),
             ('review', 'Review'),
         ],
         default='approve',

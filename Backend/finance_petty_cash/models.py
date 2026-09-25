@@ -42,7 +42,7 @@ class PettyCash(BaseModel):
         default=list,
         blank=True,
         verbose_name='Line Items',
-        help_text='Array of line items: [{"description": "Item", "quantity": 2, "unit_price": 100.00, "amount": 200.00}]'
+        help_text='Array of line items: [{"description": "Item", "currency": "ZWG", "quantity": 2, "unit_price": 100.00, "amount": 200.00}]'
     )
     category = models.CharField(
         max_length=50,
@@ -86,6 +86,7 @@ class PettyCash(BaseModel):
         choices=[
             ('draft', 'Draft'),
             ('pending', 'Pending Approval'),
+            ('verified', 'Verified'),
             ('approved', 'Approved'),
             ('rejected', 'Rejected'),
             ('disbursed', 'Disbursed'),
@@ -100,6 +101,17 @@ class PettyCash(BaseModel):
         default='medium',
         verbose_name='Priority'
     )
+
+    # Verification
+    verified_by = models.ForeignKey(
+        'hr_employee.Employee',
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='verified_petty_cash',
+        verbose_name='Verified By'
+    )
+    verified_date = models.DateTimeField(blank=True, null=True, verbose_name='Verified Date')
 
     # Approval
     approved_by = models.ForeignKey(
@@ -132,6 +144,32 @@ class PettyCash(BaseModel):
 
     # Additional Info
     notes = models.TextField(blank=True, null=True, verbose_name='Additional Notes')
+
+    def save(self, *args, **kwargs):
+        """Override save to auto-generate petty_cash_number"""
+        if not self.petty_cash_number:
+            # Generate petty cash number: PC-YYYY-NNNNNN
+            from django.utils import timezone
+            year = timezone.now().year
+
+            # Get the last petty cash number for this year
+            last_petty_cash = PettyCash.objects.filter(
+                petty_cash_number__startswith=f'PC-{year}-'
+            ).order_by('petty_cash_number').last()
+
+            if last_petty_cash and last_petty_cash.petty_cash_number:
+                # Extract the sequence number and increment
+                try:
+                    last_sequence = int(last_petty_cash.petty_cash_number.split('-')[-1])
+                    new_sequence = last_sequence + 1
+                except (ValueError, IndexError):
+                    new_sequence = 1
+            else:
+                new_sequence = 1
+
+            self.petty_cash_number = f'PC-{year}-{new_sequence:06d}'
+
+        super().save(*args, **kwargs)
 
     class Meta:
         db_table = 'finance_petty_cash'

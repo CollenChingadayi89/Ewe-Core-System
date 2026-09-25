@@ -1,10 +1,16 @@
 import { useState, useEffect } from 'react';
-import { Calendar, Badge, Card, Typography, Space, Tag, Drawer, Descriptions, Button, Row, Col, Select } from 'antd';
-import { CalendarOutlined, DollarOutlined, UserOutlined, PhoneOutlined } from '@ant-design/icons';
+import { Calendar, Card, Typography, Space, Tag, Drawer, Descriptions, Row, Col, Select } from 'antd';
+import { CalendarOutlined } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import { usePayablesStore } from '../../store/payablesStore';
 import { PageHeader, StatusTag } from '../../components/common';
-import type { Payable } from '../../types/index';
+import type { PayableListResponse } from '../../services/api/payables';
+import { formatCurrencyTotals, formatDate, formatMoney } from './payableUtils';
+
+type Payable = PayableListResponse;
+
+/** The date a payable appears on: its scheduled payment date, else its due date (ISO). */
+const calendarDate = (p: Payable) => p.collection_date || p.due_date;
 
 const { Title, Text } = Typography;
 
@@ -14,51 +20,38 @@ export const PayablesCalendar = () => {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [selectedPayables, setSelectedPayables] = useState<Payable[]>([]);
   const [filterStatus, setFilterStatus] = useState<string>('all');
-  const [filterDepartment, setFilterDepartment] = useState<string>('all');
 
   useEffect(() => {
     fetchPayables();
   }, [fetchPayables]);
 
-  // Filter payables based on status and department
+  // Only approved (awaiting payment) and paid payables are scheduled on the calendar
   const filteredPayables = payables.filter(p => {
     const statusMatch = filterStatus === 'all' || p.status === filterStatus;
-    const departmentMatch = filterDepartment === 'all' || p.department === filterDepartment;
-    // Only show approved, scheduled, or overdue payables on calendar
-    const relevantStatus = ['approved', 'scheduled', 'paid', 'overdue'].includes(p.status);
-    return statusMatch && departmentMatch && relevantStatus;
+    return statusMatch && ['approved', 'paid'].includes(p.status);
   });
 
   // Get payables for a specific date
   const getPayablesForDate = (date: Dayjs): Payable[] => {
-    const dateStr = date.format('DD/MM/YYYY');
-    return filteredPayables.filter(p => p.collectionDate === dateStr);
+    const dateStr = date.format('YYYY-MM-DD');
+    return filteredPayables.filter(p => calendarDate(p) === dateStr);
   };
 
   // Get list data for calendar cell
   const getListData = (value: Dayjs) => {
     const payablesForDate = getPayablesForDate(value);
     return payablesForDate.map(p => ({
-      type: p.status === 'overdue' ? 'error' : p.status === 'scheduled' || p.status === 'approved' ? 'warning' : 'success',
-      content: `${p.clientName} - ZWG ${p.amount.toLocaleString()}`,
+      type: p.is_overdue ? 'error' : p.status === 'approved' ? 'warning' : 'success',
+      content: `${p.payee_name} - ${formatMoney(p.currency, p.total_amount)}`,
       payable: p,
     }));
   };
 
   // Get color for payable status
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'overdue':
-        return '#ff4d4f'; // Red
-      case 'approved':
-        return '#52c41a'; // Green
-      case 'scheduled':
-        return '#1890ff'; // Blue
-      case 'paid':
-        return '#722ed1'; // Purple
-      default:
-        return '#faad14'; // Orange
-    }
+  const getStatusColor = (payable: Payable) => {
+    if (payable.is_overdue) return '#ff4d4f'; // Red
+    if (payable.status === 'paid') return '#722ed1'; // Purple
+    return '#52c41a'; // Green: approved, awaiting payment
   };
 
   // Calendar cell renderer with colorful badges
@@ -76,18 +69,18 @@ export const PayablesCalendar = () => {
               marginBottom: '4px',
               padding: '4px 6px',
               borderRadius: '4px',
-              background: `${getStatusColor(item.payable.status)}15`,
-              borderLeft: `3px solid ${getStatusColor(item.payable.status)}`,
+              background: `${getStatusColor(item.payable)}15`,
+              borderLeft: `3px solid ${getStatusColor(item.payable)}`,
               fontSize: '11px',
               cursor: 'pointer',
               transition: 'all 0.2s',
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.background = `${getStatusColor(item.payable.status)}25`;
+              e.currentTarget.style.background = `${getStatusColor(item.payable)}25`;
               e.currentTarget.style.transform = 'translateX(2px)';
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.background = `${getStatusColor(item.payable.status)}15`;
+              e.currentTarget.style.background = `${getStatusColor(item.payable)}15`;
               e.currentTarget.style.transform = 'translateX(0)';
             }}
           >
@@ -95,14 +88,14 @@ export const PayablesCalendar = () => {
               strong
               style={{
                 fontSize: '11px',
-                color: getStatusColor(item.payable.status),
+                color: getStatusColor(item.payable),
                 display: 'block',
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
               }}
             >
-              {item.payable.clientName}
+              {item.payable.payee_name}
             </Text>
             <Text
               style={{
@@ -111,7 +104,7 @@ export const PayablesCalendar = () => {
                 display: 'block',
               }}
             >
-              ZWG {item.payable.amount.toLocaleString()}
+              {formatMoney(item.payable.currency, item.payable.total_amount)}
             </Text>
           </div>
         ))}
@@ -146,16 +139,10 @@ export const PayablesCalendar = () => {
 
   // Calculate statistics
   const stats = {
-    totalAmount: filteredPayables.reduce((sum, p) => sum + p.amount, 0),
+    totalAmount: formatCurrencyTotals(filteredPayables),
     totalPayables: filteredPayables.length,
-    thisMonth: filteredPayables.filter(p => {
-      const collectionDate = dayjs(p.collectionDate, 'DD/MM/YYYY');
-      return collectionDate.month() === dayjs().month() && collectionDate.year() === dayjs().year();
-    }).length,
-    upcoming: filteredPayables.filter(p => {
-      const collectionDate = dayjs(p.collectionDate, 'DD/MM/YYYY');
-      return collectionDate.isAfter(dayjs());
-    }).length,
+    thisMonth: filteredPayables.filter(p => dayjs(calendarDate(p)).isSame(dayjs(), 'month')).length,
+    upcoming: filteredPayables.filter(p => dayjs(calendarDate(p)).isAfter(dayjs(), 'day')).length,
   };
 
   return (
@@ -186,7 +173,7 @@ export const PayablesCalendar = () => {
               <Text type="secondary">Total Scheduled</Text>
               <Title level={3} style={{ margin: 0, color: '#00d084' }}>
 
-                ZWG {stats.totalAmount.toLocaleString()}
+                {stats.totalAmount}
               </Title>
             </Space>
           </Card>
@@ -259,29 +246,11 @@ export const PayablesCalendar = () => {
               style={{ width: 150 }}
             >
               <Select.Option value="all">All Statuses</Select.Option>
-              <Select.Option value="approved">Approved</Select.Option>
-              <Select.Option value="scheduled">Scheduled</Select.Option>
+              <Select.Option value="approved">Awaiting Payment</Select.Option>
               <Select.Option value="paid">Paid</Select.Option>
-              <Select.Option value="overdue">Overdue</Select.Option>
             </Select>
           </Space>
 
-          <Space>
-            <Text strong>Filter by Department:</Text>
-            <Select
-              value={filterDepartment}
-              onChange={setFilterDepartment}
-              style={{ width: 150 }}
-            >
-              <Select.Option value="all">All Departments</Select.Option>
-              <Select.Option value="Finance">Finance</Select.Option>
-              <Select.Option value="Operations">Operations</Select.Option>
-              <Select.Option value="HR">HR</Select.Option>
-              <Select.Option value="IT">IT</Select.Option>
-              <Select.Option value="Marketing">Marketing</Select.Option>
-              <Select.Option value="Projects">Projects</Select.Option>
-            </Select>
-          </Space>
         </Space>
       </Card>
 
@@ -313,17 +282,7 @@ export const PayablesCalendar = () => {
               background: '#52c41a',
               boxShadow: '0 2px 8px rgba(82, 196, 26, 0.4)',
             }} />
-            <Text strong style={{ color: '#52c41a' }}>Approved</Text>
-          </Space>
-          <Space>
-            <div style={{
-              width: '12px',
-              height: '12px',
-              borderRadius: '50%',
-              background: '#1890ff',
-              boxShadow: '0 2px 8px rgba(24, 144, 255, 0.4)',
-            }} />
-            <Text strong style={{ color: '#1890ff' }}>Scheduled</Text>
+            <Text strong style={{ color: '#52c41a' }}>Awaiting Payment</Text>
           </Space>
           <Space>
             <div style={{
@@ -382,18 +341,18 @@ export const PayablesCalendar = () => {
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Text style={{ color: 'rgba(255,255,255,0.8)', fontSize: '13px' }}>Total Amount for This Day</Text>
                 <Title level={3} style={{ margin: 0, color: '#fff' }}>
-                  ZWG {selectedPayables.reduce((sum, p) => sum + p.amount, 0).toLocaleString()}
+                  {formatCurrencyTotals(selectedPayables)}
                 </Title>
                 <Text style={{ color: 'rgba(255,255,255,0.8)', fontSize: '13px' }}>{selectedPayables.length} payable(s)</Text>
               </Space>
             </Card>
 
-            {selectedPayables.map((payable, index) => (
+            {selectedPayables.map((payable) => (
               <Card
                 key={payable.id}
                 style={{
                   borderLeft: `4px solid ${
-                    payable.status === 'overdue' ? '#cf2e2e' :
+                    payable.is_overdue ? '#cf2e2e' :
                     payable.status === 'paid' ? '#52c41a' :
                     '#ff6900'
                   }`,
@@ -401,44 +360,34 @@ export const PayablesCalendar = () => {
               >
                 <Space direction="vertical" style={{ width: '100%' }} size="small">
                   <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-                    <Text strong style={{ fontSize: '16px' }}>{payable.clientName}</Text>
+                    <Text strong style={{ fontSize: '16px' }}>{payable.payee_name}</Text>
                     <StatusTag status={payable.status} />
                   </Space>
 
                   <Descriptions column={1} size="small">
-                    <Descriptions.Item label="Payable ID">
-                      <Text strong>{payable.id}</Text>
+                    <Descriptions.Item label="Payable">
+                      <Text strong>{payable.payable_number}</Text>
                     </Descriptions.Item>
-                    <Descriptions.Item label="Invoice">
-                      {payable.invoiceNumber}
+                    <Descriptions.Item label="Payee">
+                      {payable.payee_type === 'member' ? 'Member' : 'Vendor'} · {payable.payee_reference}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="For">
+                      {payable.category_display}
+                      {payable.invoice_number ? ` (${payable.invoice_number})` : ''}
                     </Descriptions.Item>
                     <Descriptions.Item label="Amount">
                       <Text strong style={{ color: '#00d084', fontSize: '16px' }}>
-                        ZWG {payable.amount.toLocaleString()}
+                        {formatMoney(payable.currency, payable.total_amount)}
                       </Text>
                     </Descriptions.Item>
-                    <Descriptions.Item label="Department">
-                      {payable.department}
-                    </Descriptions.Item>
+                    <Descriptions.Item label="Due Date">{formatDate(payable.due_date)}</Descriptions.Item>
                     <Descriptions.Item label="Priority">
                       <Tag color={payable.priority === 'high' ? 'red' : payable.priority === 'medium' ? 'orange' : 'blue'}>
                         {payable.priority.toUpperCase()}
                       </Tag>
                     </Descriptions.Item>
-                    <Descriptions.Item label="Contact Person">
-                      <Space>
-                        <UserOutlined />
-                        {payable.contactPerson || 'N/A'}
-                      </Space>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Phone">
-                      <Space>
-                        <PhoneOutlined />
-                        {payable.phone || 'N/A'}
-                      </Space>
-                    </Descriptions.Item>
                     <Descriptions.Item label="Payment Method">
-                      {payable.paymentMethod || 'N/A'}
+                      {payable.payment_method || 'N/A'}
                     </Descriptions.Item>
                     <Descriptions.Item label="Description">
                       {payable.description}

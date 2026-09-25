@@ -266,6 +266,7 @@ class ApprovalRequestDetailSerializer(serializers.ModelSerializer):
                 'status': content_object.status,
                 'emergency_contact': getattr(content_object, 'emergency_contact', None),
                 'emergency_address': getattr(content_object, 'emergency_address', None),
+                'supporting_documents': getattr(content_object, 'supporting_documents', None),
             }
 
         elif content_type_model == 'expense':
@@ -275,9 +276,11 @@ class ApprovalRequestDetailSerializer(serializers.ModelSerializer):
                 'expense_number': getattr(content_object, 'expense_number', None),
                 'category': getattr(content_object, 'category', None),
                 'amount': float(content_object.amount) if hasattr(content_object, 'amount') else None,
-                'date': content_object.date.strftime('%d/%m/%Y') if hasattr(content_object, 'date') else None,
+                'currency': getattr(content_object, 'currency', 'ZWG'),
+                'date': content_object.expense_date.strftime('%d/%m/%Y') if hasattr(content_object, 'expense_date') else None,
                 'description': getattr(content_object, 'description', None),
                 'status': content_object.status if hasattr(content_object, 'status') else None,
+                'attachments': getattr(content_object, 'attachments', None),
             }
 
         elif content_type_model == 'pettycash':
@@ -286,21 +289,40 @@ class ApprovalRequestDetailSerializer(serializers.ModelSerializer):
                 'type': 'petty_cash',
                 'voucher_number': getattr(content_object, 'voucher_number', None),
                 'amount': float(content_object.amount) if hasattr(content_object, 'amount') else None,
+                'currency': getattr(content_object, 'currency', 'ZWG'),
                 'purpose': getattr(content_object, 'purpose', None),
                 'date': content_object.date.strftime('%d/%m/%Y') if hasattr(content_object, 'date') else None,
                 'status': content_object.status if hasattr(content_object, 'status') else None,
+                'attachments': getattr(content_object, 'attachments', None),
             }
 
         elif content_type_model == 'payable':
-            # Payable details
+            # Payable details (payee is a vendor or a SACCO member); plain values only
+            def fmt_date(value):
+                return value.strftime('%d/%m/%Y') if value else None
+
             return {
                 'type': 'payable',
-                'invoice_number': getattr(content_object, 'invoice_number', None),
-                'vendor': getattr(content_object, 'vendor', None),
-                'amount': float(content_object.amount) if hasattr(content_object, 'amount') else None,
-                'due_date': content_object.due_date.strftime('%d/%m/%Y') if hasattr(content_object, 'due_date') else None,
-                'description': getattr(content_object, 'description', None),
-                'status': content_object.status if hasattr(content_object, 'status') else None,
+                'id': str(content_object.id),
+                'payable_number': content_object.payable_number,
+                'payee_type': content_object.payee_type,
+                'payee_type_display': content_object.get_payee_type_display(),
+                'payee_name': content_object.payee_name,
+                'payee_reference': content_object.payee_reference,
+                # Kept for existing clients that read 'vendor' as the payee label
+                'vendor': content_object.payee_name,
+                'category': content_object.category,
+                'category_display': content_object.get_category_display(),
+                'invoice_number': content_object.invoice_number,
+                'amount': float(content_object.total_amount),
+                'tax_amount': float(content_object.tax_amount),
+                'currency': content_object.currency,
+                'invoice_date': fmt_date(content_object.invoice_date),
+                'due_date': fmt_date(content_object.due_date),
+                'collection_date': fmt_date(content_object.collection_date),
+                'description': content_object.description,
+                'status': content_object.status,
+                'priority': content_object.priority,
             }
 
         elif content_type_model == 'receivable':
@@ -316,16 +338,24 @@ class ApprovalRequestDetailSerializer(serializers.ModelSerializer):
                 'status': content_object.status if hasattr(content_object, 'status') else None,
             }
 
-        elif content_type_model == 'procurement':
-            # Procurement details
+        elif content_type_model == 'procurementrequest':
+            # Full procurement request, using the same serializer as the procurement API so
+            # approvers see identical data (quotation storage paths are hidden by it).
+            # Imported lazily: finance_procurement depends on approval.utils.
+            from finance_procurement.serializers import ProcurementRequestSerializer
+            from hr_employee.models import Employee
+
+            assigned = Employee.objects.filter(
+                id__in=content_object.assigned_employees or []
+            ).values_list('id', 'first_name', 'last_name')
+
             return {
                 'type': 'procurement',
-                'request_number': getattr(content_object, 'request_number', None),
-                'item': getattr(content_object, 'item', None),
-                'quantity': getattr(content_object, 'quantity', None),
-                'estimated_cost': float(content_object.estimated_cost) if hasattr(content_object, 'estimated_cost') else None,
-                'purpose': getattr(content_object, 'purpose', None),
-                'status': content_object.status if hasattr(content_object, 'status') else None,
+                **ProcurementRequestSerializer(content_object, context=self.context).data,
+                'assigned_employee_names': {
+                    str(emp_id): f'{first_name} {last_name}'.strip()
+                    for emp_id, first_name, last_name in assigned
+                },
             }
 
         else:

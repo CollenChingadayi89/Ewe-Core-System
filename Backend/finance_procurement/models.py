@@ -54,6 +54,12 @@ class ProcurementRequest(BaseModel):
 
     # Quantity & Pricing
     quantity = models.IntegerField(default=1, verbose_name='Quantity')
+    unit = models.CharField(
+        max_length=20,
+        default='pcs',
+        verbose_name='Unit of Measurement',
+        help_text='e.g., pcs, boxes, kg, liters, services'
+    )
     unit_price = models.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -75,10 +81,45 @@ class ProcurementRequest(BaseModel):
         verbose_name='Currency'
     )
 
-    # Justification
+    # Quotations (minimum 3 required) - Simplified to document-only
+    quotations = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='Vendor Quotations',
+        help_text='Array of quotation documents: [{"vendor_name": "ABC Ltd", "document_url": "path/to/doc", "is_selected": true}]'
+    )
+
+    # Line Items (similar to petty cash)
+    line_items = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='Line Items',
+        help_text='Array of items: [{"description": "Item", "quantity": 2, "unit": "pcs", "unit_price": 100.00, "amount": 200.00}]'
+    )
+
+    # Employee Assignment
+    is_for_employee = models.BooleanField(
+        default=False,
+        verbose_name='Is for Specific Employee(s)',
+        help_text='True if items are for individual employee(s), False if for organization'
+    )
+    assigned_employees = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='Assigned Employees',
+        help_text='Array of employee IDs when is_for_employee=True'
+    )
+
+    # Justification & Specifications
     business_justification = models.TextField(
         verbose_name='Business Justification',
         help_text='Why this purchase is necessary'
+    )
+    technical_specifications = models.TextField(
+        blank=True,
+        null=True,
+        verbose_name='Technical Specifications',
+        help_text='Detailed technical requirements or specifications'
     )
     budget_code = models.CharField(
         max_length=50,
@@ -86,6 +127,25 @@ class ProcurementRequest(BaseModel):
         null=True,
         verbose_name='Budget Code',
         help_text='Budget line item for this expense'
+    )
+    delivery_location = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        verbose_name='Delivery Location',
+        help_text='Where items should be delivered'
+    )
+    request_type = models.CharField(
+        max_length=20,
+        choices=[
+            ('new', 'New Purchase'),
+            ('replacement', 'Replacement'),
+            ('rental', 'Rental'),
+            ('lease', 'Lease'),
+            ('service', 'Service Contract')
+        ],
+        default='new',
+        verbose_name='Request Type'
     )
 
     # Dates
@@ -179,7 +239,30 @@ class ProcurementRequest(BaseModel):
         return f"{self.request_number} - {self.item_description[:50]} (ZWG {self.total_amount})"
 
     def save(self, *args, **kwargs):
-        """Auto-calculate total amount"""
+        """Auto-generate request number and calculate total amount"""
+        # Auto-generate request number if not provided
+        if not self.request_number:
+            from django.utils import timezone
+            year = timezone.now().year
+
+            # Get the last procurement request number for this year
+            last_request = ProcurementRequest.objects.filter(
+                request_number__startswith=f'PR-{year}-'
+            ).order_by('request_number').last()
+
+            if last_request and last_request.request_number:
+                try:
+                    last_sequence = int(last_request.request_number.split('-')[-1])
+                    new_sequence = last_sequence + 1
+                except (ValueError, IndexError):
+                    new_sequence = 1
+            else:
+                new_sequence = 1
+
+            self.request_number = f'PR-{year}-{new_sequence:06d}'
+
+        # Auto-calculate total amount
         if self.unit_price:
             self.total_amount = self.quantity * self.unit_price
+
         super().save(*args, **kwargs)

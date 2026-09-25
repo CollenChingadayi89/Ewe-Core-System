@@ -64,17 +64,23 @@ const mapApiToApprovalRequest = (api: ApprovalRequestListResponse | ApprovalRequ
   // Get approval steps from detailed response
   const detailResponse = api as ApprovalRequestDetailResponse;
 
+  // Extract type and amount from content_object_details
+  const contentDetails = detailResponse.content_object_details || {};
+  const contentType = contentDetails.type || api.metadata?.type || 'other';
+  const contentAmount = contentDetails.amount || api.amount;
+
   return {
     id: api.id,
-    type: api.metadata?.type || 'other',
+    type: contentType,
     requestorId: api.requester,
     requestorName: detailResponse.requester_details?.full_name || 'Unknown',
     status: api.status as ApprovalStatus,
     priority: api.priority,
-    amount: api.amount ? parseFloat(api.amount) : undefined,
+    amount: contentAmount ? parseFloat(String(contentAmount)) : undefined,
     createdAt: api.submitted_date,
     updatedAt: api.updated_at,
     dueDate: api.due_date || undefined,
+    currentApproverId: api.current_approver || undefined,
     approvalChain: detailResponse.approval_steps?.map((step) => ({
       id: step.id.toString(),
       stage: step.stage_number,
@@ -92,6 +98,7 @@ const mapApiToApprovalRequest = (api: ApprovalRequestListResponse | ApprovalRequ
       contentType: api.content_type,
       objectId: api.object_id,
       rejectionReason: api.rejection_reason || undefined,
+      ...contentDetails,
       ...api.metadata,
     },
   };

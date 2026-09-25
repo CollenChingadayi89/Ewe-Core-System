@@ -20,7 +20,10 @@ class RequestLoggingMiddleware:
 
         if request.method in ['POST', 'PUT', 'PATCH']:
             print(f"Content-Type: {request.content_type}")
-            if hasattr(request, 'body'):
+            # Only JSON bodies are logged: reading request.body on multipart uploads loads the
+            # whole file into memory and applies DATA_UPLOAD_MAX_MEMORY_SIZE (2.5 MB) to it,
+            # which rejects legitimate file uploads.
+            if request.content_type == 'application/json':
                 try:
                     print(f"Body (first 500 chars): {request.body[:500]}")
                 except:

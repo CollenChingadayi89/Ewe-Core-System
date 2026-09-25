@@ -13,7 +13,7 @@
  * - Bulk save (no API calls until user clicks Save)
  */
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   Modal,
   Input,
@@ -74,7 +74,7 @@ interface Props {
     name: string;
   } | null;
   onClose: () => void;
-  onSave: (addedMembers: GroupMember[], removedMemberIds: string[]) => Promise<void>;
+  onSave: (addedMembers: GroupMember[], removedMemberIds: string[], oldGroupId?: string | null) => Promise<void>;
   allEmployees: Employee[];
   currentMembers: GroupMember[];
 }
@@ -143,7 +143,7 @@ const DraggableCard = ({ employee, isAvailable, onRoleClick, isDragging }: Dragg
       {...listeners}
       className="employee-card"
     >
-      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+      <Space orientation="vertical" size={4} style={{ width: '100%' }}>
         <Space>
           <UserOutlined />
           <Text strong>{employee.employee_name || `${employee.first_name} ${employee.last_name}`}</Text>
@@ -187,15 +187,54 @@ export const DragDropMemberManager = ({
   allEmployees,
   currentMembers,
 }: Props) => {
+  // Normalize currentMembers to use employee IDs for consistent comparison
+  // Store mapping from employee ID to membership ID for removal operations
+  const normalizedCurrentMembers = useMemo(() => {
+    return currentMembers.map(member => {
+      // Extract employee details if available
+      const employeeDetails = (member as any).employee_details || {};
+
+      return {
+        ...member,
+        membershipId: member.id, // Store original membership ID
+        id: member.employee_id || member.id, // Use employee ID as primary identifier
+        // Ensure name fields are available at top level
+        employee_name: employeeDetails.employee_name || member.employee_name,
+        first_name: employeeDetails.first_name || member.first_name,
+        last_name: employeeDetails.last_name || member.last_name,
+        employee_number: employeeDetails.employee_number || member.employee_number,
+        department: employeeDetails.department_name || member.department,
+      };
+    });
+  }, [currentMembers]);
+
+  const employeeIdToMembershipId = useMemo(() => {
+    const map = new Map<string, string>();
+    currentMembers.forEach(member => {
+      const employeeId = member.employee_id || member.id;
+      map.set(employeeId, member.id); // Map employee ID -> membership ID
+    });
+    return map;
+  }, [currentMembers]);
+
   // State
   const [searchAvailable, setSearchAvailable] = useState('');
   const [searchMembers, setSearchMembers] = useState('');
   const [roleFilter, setRoleFilter] = useState<string>('all');
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [members, setMembers] = useState<GroupMember[]>(currentMembers);
+  const [members, setMembers] = useState<GroupMember[]>(normalizedCurrentMembers);
   const [showWarning, setShowWarning] = useState(false);
   const [movingEmployee, setMovingEmployee] = useState<Employee | null>(null);
+  const [employeeOldGroupId, setEmployeeOldGroupId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Sync members state with currentMembers prop (reset when group changes)
+  useEffect(() => {
+    setMembers(normalizedCurrentMembers);
+    setSearchAvailable('');
+    setSearchMembers('');
+    setRoleFilter('all');
+  }, [normalizedCurrentMembers]);
 
   // Drag sensors
   const sensors = useSensors(
@@ -262,8 +301,9 @@ export const DragDropMemberManager = ({
     if (fromAvailable && targetZone === 'members-zone') {
       // Adding employee to group
       if (fromAvailable.group_id && fromAvailable.group_id !== group?.id) {
-        // Employee is in another group - show warning
+        // Employee is in another group - show warning and store old group ID
         setMovingEmployee(fromAvailable);
+        setEmployeeOldGroupId(fromAvailable.group_id);
         setShowWarning(true);
       } else {
         // Employee is not in any group or inactive in this group
@@ -308,6 +348,7 @@ export const DragDropMemberManager = ({
       addMember(movingEmployee);
       setShowWarning(false);
       setMovingEmployee(null);
+      // Keep employeeOldGroupId - will be used in handleSave to remove from old group
     }
   };
 
@@ -317,17 +358,26 @@ export const DragDropMemberManager = ({
 
     setSaving(true);
     try {
-      const originalMemberIds = new Set(currentMembers.map(m => m.id));
-      const newMemberIds = new Set(members.map(m => m.id));
+      // Use employee IDs for comparison (all members are now normalized to use employee ID)
+      const originalEmployeeIds = new Set(normalizedCurrentMembers.map(m => m.id));
+      const newEmployeeIds = new Set(members.map(m => m.id));
 
-      // Find added and removed members
-      const addedMembers = members.filter(m => !originalMemberIds.has(m.id));
-      const removedMemberIds = currentMembers
-        .filter(m => !newMemberIds.has(m.id))
-        .map(m => m.id);
+      // Find added members (those in current state but not in original)
+      const addedMembers = members.filter(m => !originalEmployeeIds.has(m.id));
 
-      await onSave(addedMembers, removedMemberIds);
+      // Find removed members (those in original but not in current state)
+      // Map employee IDs back to membership IDs for removal
+      const removedMemberIds = normalizedCurrentMembers
+        .filter(m => !newEmployeeIds.has(m.id))
+        .map(m => employeeIdToMembershipId.get(m.id) || m.membershipId || m.id);
+
+      // Pass oldGroupId if this is a move operation (employee was moved from another group)
+      await onSave(addedMembers, removedMemberIds, employeeOldGroupId);
+
       antMessage.success('Group members updated successfully');
+
+      // Reset old group ID after successful save
+      setEmployeeOldGroupId(null);
       onClose();
     } catch (error) {
       console.error('Failed to save members:', error);
@@ -339,12 +389,12 @@ export const DragDropMemberManager = ({
 
   // Calculate changes
   const changesCount = useMemo(() => {
-    const originalIds = new Set(currentMembers.map(m => m.id));
+    const originalIds = new Set(normalizedCurrentMembers.map(m => m.id));
     const newIds = new Set(members.map(m => m.id));
     const added = members.filter(m => !originalIds.has(m.id)).length;
-    const removed = currentMembers.filter(m => !newIds.has(m.id)).length;
+    const removed = normalizedCurrentMembers.filter(m => !newIds.has(m.id)).length;
     return { added, removed };
-  }, [members, currentMembers]);
+  }, [members, normalizedCurrentMembers]);
 
   return (
     <>
@@ -370,7 +420,7 @@ export const DragDropMemberManager = ({
         ]}
       >
         <Alert
-          message="Drag & Drop to Manage Members"
+          title="Drag & Drop to Manage Members"
           description="Drag employee cards from left to right to add them to the group, or right to left to remove them. Click role badges to change member roles."
           type="info"
           showIcon
@@ -386,7 +436,7 @@ export const DragDropMemberManager = ({
           <div style={{ display: 'flex', gap: 16 }}>
             {/* Available Employees Column */}
             <div style={{ flex: 1 }}>
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Space orientation="vertical" size={12} style={{ width: '100%' }}>
                 <Text strong>Available Employees ({availableEmployees.length})</Text>
                 <Input
                   prefix={<SearchOutlined />}
@@ -407,7 +457,7 @@ export const DragDropMemberManager = ({
                     backgroundColor: '#fafafa',
                   }}
                 >
-                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Space orientation="vertical" size={8} style={{ width: '100%' }}>
                     {availableEmployees.map(employee => (
                       <DraggableCard
                         key={employee.id}
@@ -428,7 +478,7 @@ export const DragDropMemberManager = ({
 
             {/* Group Members Column */}
             <div style={{ flex: 1 }}>
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Space orientation="vertical" size={12} style={{ width: '100%' }}>
                 <Text strong>Group Members ({members.length})</Text>
                 <Space>
                   <Input
@@ -462,7 +512,7 @@ export const DragDropMemberManager = ({
                     backgroundColor: '#f0f7ff',
                   }}
                 >
-                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Space orientation="vertical" size={8} style={{ width: '100%' }}>
                     {filteredMembers.map(member => (
                       <DraggableCard
                         key={member.id}
@@ -528,6 +578,7 @@ export const DragDropMemberManager = ({
         onCancel={() => {
           setShowWarning(false);
           setMovingEmployee(null);
+          setEmployeeOldGroupId(null);
         }}
         okText="Move Employee"
         okButtonProps={{ danger: true }}

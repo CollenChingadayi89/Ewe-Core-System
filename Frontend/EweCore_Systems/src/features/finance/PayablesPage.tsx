@@ -1,30 +1,46 @@
-import { useState, useEffect } from 'react';
-import { Button, Avatar, Space, Row, Col, Modal, Form, Input, Select, DatePicker, InputNumber, message, Drawer, Descriptions, Timeline, Typography, Upload, Tabs, Tag } from 'antd';
+import { useEffect, useMemo, useState } from 'react';
+import { Button, Space, Row, Col, Select, Tabs, Tag, Typography, message } from 'antd';
 import {
   PlusOutlined,
-  DownloadOutlined,
   EyeOutlined,
   CheckOutlined,
   CloseOutlined,
   DollarOutlined,
   ClockCircleOutlined,
-  FileProtectOutlined,
-  UploadOutlined,
-  CalendarOutlined,
-  UserOutlined,
-  PhoneOutlined,
-  MailOutlined,
+  WarningOutlined,
+  WalletOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
-import dayjs from 'dayjs';
 import { PageHeader, FilterBar, DataTable, StatusTag, StatCard } from '../../components/common';
 import type { Filter } from '../../components/common';
 import { useAuthStore } from '../../store/authStore';
 import { usePayablesStore } from '../../store/payablesStore';
-import type { Payable } from '../../types/index';
+import {
+  MEMBER_PAYABLE_CATEGORIES,
+  PAYABLE_CURRENCIES,
+  VENDOR_PAYABLE_CATEGORIES,
+  type MarkPaidRequest,
+  type PayableCreateRequest,
+  type PayableListResponse,
+} from '../../services/api/payables';
+import { PayableFormModal } from './PayableFormModal';
+import { PayableActionModal, type PayableAction } from './PayableActionModal';
+import { PayableDetailsDrawer } from './PayableDetailsDrawer';
+import {
+  PRIORITY_COLORS,
+  approvalProgress,
+  canApproveOrReject,
+  formatCurrencyTotals,
+  formatDate,
+  formatMoney,
+} from './payableUtils';
 
-const { TextArea } = Input;
-const { Text, Title } = Typography;
+const { Text } = Typography;
+
+type TabKey = 'all' | 'my-action' | 'my-requests';
+
+/** It is the current user's turn in this payable's workflow (approve, reject or pay). */
+const needsMyAction = (p: PayableListResponse) => Boolean(p.approval?.can_act);
 
 export const PayablesPage = () => {
   const { user } = useAuthStore();
@@ -34,260 +50,200 @@ export const PayablesPage = () => {
     loading,
     fetchPayables,
     fetchVendors,
+    addVendor,
     submitPayable,
     approvePayable,
     rejectPayable,
     markAsPaid,
-    updatePayableStatus
   } = usePayablesStore();
 
+  const [activeTab, setActiveTab] = useState<TabKey>('all');
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
-  const [departmentFilter, setDepartmentFilter] = useState<string | undefined>(undefined);
-  const [priorityFilter, setPriorityFilter] = useState<string | undefined>(undefined);
-  const [activeTab, setActiveTab] = useState('all');
-  const [requestModalVisible, setRequestModalVisible] = useState(false);
-  const [detailsDrawerVisible, setDetailsDrawerVisible] = useState(false);
-  const [actionModalVisible, setActionModalVisible] = useState(false);
-  const [selectedPayable, setSelectedPayable] = useState<Payable | null>(null);
-  const [actionType, setActionType] = useState<'approve' | 'reject' | 'paid'>('approve');
-  const [form] = Form.useForm();
-  const [actionForm] = Form.useForm();
+  const [currencyFilter, setCurrencyFilter] = useState('all');
+  const [payeeTypeFilter, setPayeeTypeFilter] = useState<string | undefined>();
+  const [categoryFilter, setCategoryFilter] = useState<string | undefined>();
+  const [statusFilter, setStatusFilter] = useState<string | undefined>();
+  const [priorityFilter, setPriorityFilter] = useState<string | undefined>();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<{ payable: PayableListResponse; action: PayableAction } | null>(null);
 
   useEffect(() => {
     fetchPayables();
     fetchVendors();
   }, [fetchPayables, fetchVendors]);
 
-  // Get my payables (created by me)
-  const myPayables = payables.filter(p => p.createdBy === user?.id);
+  // Read from the store so the drawer reflects updates after workflow actions
+  const selectedPayable = payables.find((p) => p.id === selectedId) ?? null;
 
-  // Determine which dataset to show
-  const displayPayables = activeTab === 'all' ? payables : myPayables;
+  const tabPayables = useMemo(() => {
+    if (activeTab === 'my-action') return payables.filter(needsMyAction);
+    if (activeTab === 'my-requests') return payables.filter((p) => p.submitted_by === user?.id);
+    return payables;
+  }, [activeTab, payables, user?.id]);
 
-  // Calculate statistics
+  const currencyPayables = useMemo(
+    () => (currencyFilter === 'all' ? tabPayables : tabPayables.filter((p) => p.currency === currencyFilter)),
+    [tabPayables, currencyFilter]
+  );
+
+  const filteredPayables = useMemo(() => {
+    const search = searchTerm.trim().toLowerCase();
+    return currencyPayables.filter((p) => {
+      const matchesSearch = !search || [p.payable_number, p.payee_name, p.payee_reference, p.invoice_number, p.description]
+        .some((field) => field?.toLowerCase().includes(search));
+      return matchesSearch
+        && (!payeeTypeFilter || p.payee_type === payeeTypeFilter)
+        && (!categoryFilter || p.category === categoryFilter)
+        && (!statusFilter || p.status === statusFilter)
+        && (!priorityFilter || p.priority === priorityFilter);
+    });
+  }, [currencyPayables, searchTerm, payeeTypeFilter, categoryFilter, statusFilter, priorityFilter]);
+
+  const fallbackCurrency = currencyFilter === 'all' ? 'ZWG' : currencyFilter;
   const stats = {
-    total: displayPayables.reduce((sum, p) => sum + p.amount, 0),
-    pending: displayPayables.filter(p => p.status === 'pending').length,
-    dueThisWeek: displayPayables.filter(p => {
-      const dueDate = dayjs(p.collectionDate, 'DD/MM/YYYY');
-      const today = dayjs();
-      const weekFromNow = today.add(7, 'day');
-      return dueDate.isAfter(today) && dueDate.isBefore(weekFromNow) && (p.status === 'approved' || p.status === 'scheduled');
-    }).length,
-    overdue: displayPayables.filter(p => p.status === 'overdue').length,
+    outstanding: formatCurrencyTotals(
+      currencyPayables.filter((p) => p.status === 'pending' || p.status === 'approved'),
+      fallbackCurrency
+    ),
+    awaitingMe: payables.filter(needsMyAction).length,
+    awaitingPayment: formatCurrencyTotals(currencyPayables.filter((p) => p.status === 'approved'), fallbackCurrency),
+    overdue: currencyPayables.filter((p) => p.is_overdue).length,
   };
 
-  // Filter payables
-  const filteredPayables = displayPayables.filter((payable) => {
-    const matchesSearch = !searchTerm ||
-      payable.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      payable.invoiceNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      payable.description.toLowerCase().includes(searchTerm.toLowerCase());
-
-    const matchesStatus = !statusFilter || payable.status === statusFilter;
-    const matchesDepartment = !departmentFilter || payable.department === departmentFilter;
-    const matchesPriority = !priorityFilter || payable.priority === priorityFilter;
-
-    return matchesSearch && matchesStatus && matchesDepartment && matchesPriority;
-  });
-
-  const handleSubmitPayable = async (values: any) => {
-    try {
-      const selectedVendor = vendors.find(v => v.id === values.clientId);
-
-      await submitPayable(user!.id, user!.name, {
-        clientId: values.clientId,
-        clientName: selectedVendor?.companyName || values.clientName,
-        contactPerson: selectedVendor?.contactPerson || values.contactPerson,
-        phone: selectedVendor?.phone || values.phone,
-        email: selectedVendor?.email || values.email,
-        invoiceNumber: values.invoiceNumber,
-        invoiceDate: values.invoiceDate.format('DD/MM/YYYY'),
-        amount: values.amount,
-        currency: 'ZWG',
-        dueDate: values.dueDate.format('DD/MM/YYYY'),
-        collectionDate: values.collectionDate.format('DD/MM/YYYY'),
-        department: values.department,
-        description: values.description,
-        paymentMethod: values.paymentMethod,
-        priority: values.priority,
-        notes: values.notes,
-        attachments: values.attachments?.fileList?.map((file: any) => file.name) || [],
-      });
-
-      message.success('Payable request submitted successfully!');
-      setRequestModalVisible(false);
-      form.resetFields();
-    } catch (error) {
-      message.error('Failed to submit payable request');
-    }
+  const handleCreate = async (data: PayableCreateRequest) => {
+    const created = await submitPayable(data);
+    message.success(`Payable ${created.payable_number} submitted for approval`);
+    setCreateOpen(false);
   };
 
-  const handleViewDetails = (payable: Payable) => {
-    setSelectedPayable(payable);
-    setDetailsDrawerVisible(true);
+  const handleApprove = async (payable: PayableListResponse, comments: string) => {
+    await approvePayable(payable, comments);
+    message.success(`${payable.payable_number} approved`);
   };
 
-  const handleOpenActionModal = (payable: Payable, type: 'approve' | 'reject' | 'paid') => {
-    setSelectedPayable(payable);
-    setActionType(type);
-    setActionModalVisible(true);
+  const handleReject = async (payable: PayableListResponse, comments: string) => {
+    await rejectPayable(payable, comments);
+    message.success(`${payable.payable_number} rejected`);
   };
 
-  const handleSubmitAction = async (values: any) => {
-    if (!selectedPayable || !user) return;
-
-    try {
-      if (actionType === 'approve') {
-        await approvePayable(selectedPayable.id, user.id, user.name, values.comment);
-        message.success('Payable approved successfully!');
-      } else if (actionType === 'reject') {
-        await rejectPayable(selectedPayable.id, user.id, user.name, values.comment);
-        message.success('Payable rejected successfully!');
-      } else if (actionType === 'paid') {
-        await markAsPaid(selectedPayable.id, user.id, user.name);
-        message.success('Payable marked as paid successfully!');
-      }
-
-      setActionModalVisible(false);
-      setDetailsDrawerVisible(false);
-      actionForm.resetFields();
-    } catch (error) {
-      message.error('Failed to process action');
-    }
+  const handlePay = async (payable: PayableListResponse, data: MarkPaidRequest) => {
+    await markAsPaid(payable.id, data);
+    message.success(`${payable.payable_number} marked as paid`);
   };
 
-  const handleExport = () => {
-    message.info('Exporting payables to Excel...');
-  };
+  const openAction = (payable: PayableListResponse, action: PayableAction) => setPendingAction({ payable, action });
 
-  // Table columns
-  const columns: ColumnsType<Payable> = [
+  const columns: ColumnsType<PayableListResponse> = [
     {
-      title: 'ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 130,
+      title: 'Payable',
+      dataIndex: 'payable_number',
+      key: 'payable_number',
+      width: 150,
       fixed: 'left',
-      render: (id: string) => <Text strong>{id}</Text>,
-    },
-    {
-      title: 'Client',
-      dataIndex: 'clientName',
-      key: 'clientName',
-      width: 200,
-      render: (name: string, record: Payable) => (
-        <Space>
-          <Avatar style={{ backgroundColor: '#00d084' }}>
-            {name.split(' ').map(n => n[0]).join('').slice(0, 2)}
-          </Avatar>
-          <div>
-            <div><Text strong>{name}</Text></div>
-            <div><Text type="secondary" style={{ fontSize: '12px' }}>{record.contactPerson}</Text></div>
-          </div>
-        </Space>
+      render: (number: string, record) => (
+        <>
+          <Text strong>{number}</Text>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>{formatDate(record.created_at)}</Text></div>
+        </>
       ),
     },
     {
-      title: 'Invoice',
-      dataIndex: 'invoiceNumber',
-      key: 'invoiceNumber',
-      width: 150,
+      title: 'Payee',
+      dataIndex: 'payee_name',
+      key: 'payee_name',
+      width: 230,
+      render: (name: string, record) => (
+        <>
+          <Text strong>{name}</Text>
+          <div>
+            <Tag color={record.payee_type === 'member' ? 'green' : 'blue'} style={{ marginRight: 6 }}>
+              {record.payee_type === 'member' ? 'Member' : 'Vendor'}
+            </Tag>
+            <Text type="secondary" style={{ fontSize: 12 }}>{record.payee_reference}</Text>
+          </div>
+        </>
+      ),
+    },
+    {
+      title: 'For',
+      dataIndex: 'category_display',
+      key: 'category_display',
+      width: 170,
+      render: (category: string, record) => (
+        <>
+          <div>{category}</div>
+          {record.invoice_number && <Text type="secondary" style={{ fontSize: 12 }}>{record.invoice_number}</Text>}
+        </>
+      ),
     },
     {
       title: 'Amount',
-      dataIndex: 'amount',
-      key: 'amount',
-      width: 130,
-      render: (amount: number) => (
-        <Text strong style={{ color: '#00d084' }}>
-          ZWG {amount.toLocaleString()}
+      dataIndex: 'total_amount',
+      key: 'total_amount',
+      width: 150,
+      align: 'right',
+      render: (amount: string, record) => <Text strong>{formatMoney(record.currency, amount)}</Text>,
+      sorter: (a, b) => Number(a.total_amount) - Number(b.total_amount),
+    },
+    {
+      title: 'Due',
+      dataIndex: 'due_date',
+      key: 'due_date',
+      width: 120,
+      render: (date: string, record) => (
+        <Text type={record.is_overdue ? 'danger' : undefined}>
+          {formatDate(date)}
+          {record.is_overdue && <div style={{ fontSize: 12 }}>Overdue</div>}
         </Text>
       ),
-    },
-    {
-      title: 'Department',
-      dataIndex: 'department',
-      key: 'department',
-      width: 120,
-    },
-    {
-      title: 'Collection Date',
-      dataIndex: 'collectionDate',
-      key: 'collectionDate',
-      width: 130,
-      render: (date: string) => (
-        <Space>
-          <CalendarOutlined />
-          <Text>{date}</Text>
-        </Space>
-      ),
+      sorter: (a, b) => a.due_date.localeCompare(b.due_date),
     },
     {
       title: 'Status',
       dataIndex: 'status',
       key: 'status',
-      width: 120,
-      render: (status: string) => <StatusTag status={status} />,
+      width: 230,
+      render: (status: string, record) => {
+        const progress = approvalProgress(record);
+        return (
+          <>
+            <StatusTag status={status} />
+            {progress && <div><Text type="secondary" style={{ fontSize: 12 }}>{progress}</Text></div>}
+          </>
+        );
+      },
     },
     {
       title: 'Priority',
       dataIndex: 'priority',
       key: 'priority',
-      width: 100,
-      render: (priority: string) => {
-        const colors: { [key: string]: string } = {
-          high: 'red',
-          medium: 'orange',
-          low: 'blue',
-        };
-        return <Tag color={colors[priority]}>{priority.toUpperCase()}</Tag>;
-      },
+      width: 90,
+      render: (priority: string) => <Tag color={PRIORITY_COLORS[priority]}>{priority.toUpperCase()}</Tag>,
     },
     {
       title: 'Actions',
       key: 'actions',
       fixed: 'right',
-      width: 280,
-      render: (_: any, record: Payable) => (
-        <Space>
-          <Button
-            size="small"
-            icon={<EyeOutlined />}
-            onClick={() => handleViewDetails(record)}
-          >
+      width: 230,
+      render: (_, record) => (
+        <Space size="small" wrap>
+          <Button size="small" icon={<EyeOutlined />} onClick={() => setSelectedId(record.id)} aria-label={`View ${record.payable_number}`}>
             View
           </Button>
-          {record.status === 'pending' && (
+          {canApproveOrReject(record) && (
             <>
-              <Button
-                size="small"
-                type="primary"
-                icon={<CheckOutlined />}
-                onClick={() => handleOpenActionModal(record, 'approve')}
-              >
+              <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => openAction(record, 'approve')}>
                 Approve
               </Button>
-              <Button
-                size="small"
-                danger
-                icon={<CloseOutlined />}
-                onClick={() => handleOpenActionModal(record, 'reject')}
-              >
+              <Button size="small" danger icon={<CloseOutlined />} onClick={() => openAction(record, 'reject')}>
                 Reject
               </Button>
             </>
           )}
-          {record.status === 'approved' && (
-            <Button
-              size="small"
-              type="primary"
-              icon={<CheckOutlined />}
-              onClick={() => handleOpenActionModal(record, 'paid')}
-              style={{ background: '#52c41a' }}
-            >
-              Mark Paid
+          {record.can_mark_paid && (
+            <Button size="small" type="primary" icon={<DollarOutlined />} onClick={() => openAction(record, 'pay')}>
+              Record Payment
             </Button>
           )}
         </Space>
@@ -295,14 +251,41 @@ export const PayablesPage = () => {
     },
   ];
 
-  // Filters configuration
   const filters: Filter[] = [
     {
       type: 'search',
-      placeholder: 'Search by client, invoice, or description...',
+      placeholder: 'Search payable, payee, invoice or description...',
       value: searchTerm,
       onChange: setSearchTerm,
-      width: 350,
+      width: 320,
+    },
+    {
+      type: 'select',
+      label: 'Payee',
+      placeholder: 'All Payees',
+      value: payeeTypeFilter,
+      onChange: (value: string | undefined) => {
+        setPayeeTypeFilter(value);
+        setCategoryFilter(undefined);
+      },
+      options: [
+        { label: 'Vendors', value: 'vendor' },
+        { label: 'Members', value: 'member' },
+      ],
+      width: 140,
+    },
+    {
+      type: 'select',
+      label: 'Category',
+      placeholder: 'All Categories',
+      value: categoryFilter,
+      onChange: setCategoryFilter,
+      options: payeeTypeFilter === 'member'
+        ? MEMBER_PAYABLE_CATEGORIES
+        : payeeTypeFilter === 'vendor'
+          ? VENDOR_PAYABLE_CATEGORIES
+          : [...MEMBER_PAYABLE_CATEGORIES, ...VENDOR_PAYABLE_CATEGORIES],
+      width: 190,
     },
     {
       type: 'select',
@@ -311,32 +294,13 @@ export const PayablesPage = () => {
       value: statusFilter,
       onChange: setStatusFilter,
       options: [
-        { label: 'Draft', value: 'draft' },
-        { label: 'Pending', value: 'pending' },
-        { label: 'Approved', value: 'approved' },
-        { label: 'Scheduled', value: 'scheduled' },
+        { label: 'Pending Approval', value: 'pending' },
+        { label: 'Awaiting Payment', value: 'approved' },
         { label: 'Paid', value: 'paid' },
-        { label: 'Overdue', value: 'overdue' },
         { label: 'Rejected', value: 'rejected' },
+        { label: 'Cancelled', value: 'cancelled' },
       ],
-      width: 150,
-    },
-    {
-      type: 'select',
-      label: 'Department',
-      placeholder: 'All Departments',
-      value: departmentFilter,
-      onChange: setDepartmentFilter,
-      options: [
-        { label: 'Finance', value: 'Finance' },
-        { label: 'Operations', value: 'Operations' },
-        { label: 'HR', value: 'HR' },
-        { label: 'IT', value: 'IT' },
-        { label: 'Marketing', value: 'Marketing' },
-        { label: 'Projects', value: 'Projects' },
-        { label: 'Facilities', value: 'Facilities' },
-      ],
-      width: 150,
+      width: 170,
     },
     {
       type: 'select',
@@ -355,561 +319,99 @@ export const PayablesPage = () => {
 
   const handleResetFilters = () => {
     setSearchTerm('');
+    setCurrencyFilter('all');
+    setPayeeTypeFilter(undefined);
+    setCategoryFilter(undefined);
     setStatusFilter(undefined);
-    setDepartmentFilter(undefined);
     setPriorityFilter(undefined);
   };
 
   return (
     <div>
       <PageHeader
-        title="Payables Management"
-        subtitle="Track and manage client payment requests"
-        breadcrumbs={[
-          { title: 'Finance' },
-          { title: 'Payables' },
-        ]}
+        title="Payables"
+        subtitle="Payments to vendors and SACCO members, approved and paid through the payables workflow"
+        breadcrumbs={[{ title: 'Finance' }, { title: 'Payables' }]}
         actions={
-          <Space>
-            <Button icon={<DownloadOutlined />} onClick={handleExport}>
-              Export
-            </Button>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={() => setRequestModalVisible(true)}
-              style={{
-                background: 'linear-gradient(135deg, #00d084 0%, #00BFA5 100%)',
-                border: 'none',
-                borderRadius: '8px',
-              }}
-            >
-              New Payable Request
+          <Space wrap>
+            <Select
+              value={currencyFilter}
+              onChange={setCurrencyFilter}
+              style={{ width: 160 }}
+              size="large"
+              aria-label="Filter by currency"
+              options={[
+                { value: 'all', label: 'All Currencies' },
+                ...PAYABLE_CURRENCIES.map((c) => ({ value: c, label: `${c} Only` })),
+              ]}
+            />
+            <Button type="primary" size="large" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+              New Payable
             </Button>
           </Space>
         }
       />
 
-      {/* Statistics Cards */}
-      <Row gutter={[16, 16]} style={{ marginBottom: '24px' }}>
+      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
         <Col xs={24} sm={12} lg={6}>
-          <StatCard
-            title="Total Payables"
-            value={`ZWG ${stats.total.toLocaleString()}`}
-            icon={<DollarOutlined />}
-            iconBg="#00d084"
-          />
+          <StatCard title="Outstanding" value={stats.outstanding} icon={<WalletOutlined />} iconBg="rgba(6, 147, 227, 0.1)" />
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <StatCard
-            title="Pending Approval"
-            value={stats.pending}
-            icon={<ClockCircleOutlined />}
-            iconBg="#ff6900"
-          />
+          <StatCard title="Awaiting My Action" value={stats.awaitingMe} icon={<ClockCircleOutlined />} iconBg="rgba(255, 105, 0, 0.1)" />
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <StatCard
-            title="Due This Week"
-            value={stats.dueThisWeek}
-            icon={<CalendarOutlined />}
-            iconBg="#0693e3"
-          />
+          <StatCard title="Awaiting Payment" value={stats.awaitingPayment} icon={<DollarOutlined />} iconBg="rgba(0, 208, 132, 0.1)" />
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <StatCard
-            title="Overdue"
-            value={stats.overdue}
-            icon={<FileProtectOutlined />}
-            iconBg="#cf2e2e"
-          />
+          <StatCard title="Overdue" value={stats.overdue} icon={<WarningOutlined />} iconBg="rgba(207, 46, 46, 0.1)" />
         </Col>
       </Row>
 
-      {/* Tabs */}
       <Tabs
         activeKey={activeTab}
-        onChange={setActiveTab}
-        style={{ marginBottom: '16px' }}
+        onChange={(key) => setActiveTab(key as TabKey)}
         items={[
-          {
-            key: 'all',
-            label: 'All Payables',
-          },
-          {
-            key: 'my-payables',
-            label: 'My Requests',
-          },
+          { key: 'all', label: 'All Payables' },
+          { key: 'my-action', label: `Awaiting My Action (${stats.awaitingMe})` },
+          { key: 'my-requests', label: 'My Requests' },
         ]}
       />
 
-      {/* Filters */}
-      <FilterBar
-        filters={filters}
-        onReset={handleResetFilters}
-        style={{ marginBottom: '16px' }}
-      />
+      <FilterBar filters={filters} onReset={handleResetFilters} />
 
-      {/* Data Table */}
       <DataTable
         columns={columns}
         dataSource={filteredPayables}
         rowKey="id"
         loading={loading}
         scroll={{ x: 1400 }}
+        locale={{ emptyText: activeTab === 'my-action' ? 'Nothing is waiting for you' : 'No payables found' }}
       />
 
-      {/* Request Modal */}
-      <Modal
-        title="New Payable Request"
-        open={requestModalVisible}
-        onCancel={() => {
-          setRequestModalVisible(false);
-          form.resetFields();
-        }}
-        footer={null}
-        width={700}
-      >
-        <Form
-          form={form}
-          layout="vertical"
-          onFinish={handleSubmitPayable}
-        >
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                label="Select Client/Vendor"
-                name="clientId"
-                rules={[{ required: true, message: 'Please select a client' }]}
-              >
-                <Select
-                  placeholder="Select existing vendor"
-                  size="large"
-                  showSearch
-                  optionFilterProp="children"
-                >
-                  {(vendors || []).map(vendor => (
-                    <Select.Option key={vendor.id} value={vendor.id}>
-                      {vendor.companyName}
-                    </Select.Option>
-                  ))}
-                </Select>
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                label="Invoice Number"
-                name="invoiceNumber"
-                rules={[{ required: true, message: 'Please enter invoice number' }]}
-              >
-                <Input placeholder="INV-2026-001" size="large" />
-              </Form.Item>
-            </Col>
-          </Row>
+      <PayableFormModal
+        open={createOpen}
+        vendors={vendors}
+        onClose={() => setCreateOpen(false)}
+        onSubmit={handleCreate}
+        onAddVendor={addVendor}
+      />
 
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                label="Invoice Date"
-                name="invoiceDate"
-                rules={[{ required: true, message: 'Please select invoice date' }]}
-              >
-                <DatePicker
-                  style={{ width: '100%' }}
-                  size="large"
-                  format="DD/MM/YYYY"
-                />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                label="Amount (ZWG)"
-                name="amount"
-                rules={[{ required: true, message: 'Please enter amount' }]}
-              >
-                <InputNumber
-                  style={{ width: '100%' }}
-                  size="large"
-                  min={0}
-                  step={100}
-                  formatter={value => `ZWG ${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                  parser={(value) => value!.replace(/ZWG\s?|(,*)/g, '') as any}
-                />
-              </Form.Item>
-            </Col>
-          </Row>
+      <PayableDetailsDrawer
+        key={selectedPayable?.id ?? 'none'}
+        payable={selectedPayable}
+        onClose={() => setSelectedId(null)}
+        onAction={openAction}
+      />
 
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                label="Due Date"
-                name="dueDate"
-                rules={[{ required: true, message: 'Please select due date' }]}
-              >
-                <DatePicker
-                  style={{ width: '100%' }}
-                  size="large"
-                  format="DD/MM/YYYY"
-                />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                label="Collection Date"
-                name="collectionDate"
-                rules={[{ required: true, message: 'Please select collection date' }]}
-                tooltip="Date when client will come to collect payment"
-              >
-                <DatePicker
-                  style={{ width: '100%' }}
-                  size="large"
-                  format="DD/MM/YYYY"
-                />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                label="Department"
-                name="department"
-                rules={[{ required: true, message: 'Please select department' }]}
-              >
-                <Select placeholder="Select department" size="large">
-                  <Select.Option value="Finance">Finance</Select.Option>
-                  <Select.Option value="Operations">Operations</Select.Option>
-                  <Select.Option value="HR">HR</Select.Option>
-                  <Select.Option value="IT">IT</Select.Option>
-                  <Select.Option value="Marketing">Marketing</Select.Option>
-                  <Select.Option value="Projects">Projects</Select.Option>
-                  <Select.Option value="Facilities">Facilities</Select.Option>
-                </Select>
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                label="Payment Method"
-                name="paymentMethod"
-                rules={[{ required: true, message: 'Please select payment method' }]}
-              >
-                <Select placeholder="Select payment method" size="large">
-                  <Select.Option value="Bank Transfer">Bank Transfer</Select.Option>
-                  <Select.Option value="Cash">Cash</Select.Option>
-                  <Select.Option value="Cheque">Cheque</Select.Option>
-                  <Select.Option value="Mobile Money">Mobile Money</Select.Option>
-                </Select>
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Row gutter={16}>
-            <Col span={24}>
-              <Form.Item
-                label="Priority"
-                name="priority"
-                initialValue="medium"
-                rules={[{ required: true, message: 'Please select priority' }]}
-              >
-                <Select size="large">
-                  <Select.Option value="low">Low</Select.Option>
-                  <Select.Option value="medium">Medium</Select.Option>
-                  <Select.Option value="high">High</Select.Option>
-                </Select>
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Form.Item
-            label="Description"
-            name="description"
-            rules={[{ required: true, message: 'Please enter description' }]}
-          >
-            <TextArea
-              rows={4}
-              placeholder="Describe the purpose of this payable..."
-              maxLength={500}
-              showCount
-            />
-          </Form.Item>
-
-          <Form.Item
-            label="Notes"
-            name="notes"
-          >
-            <TextArea
-              rows={3}
-              placeholder="Additional notes or instructions..."
-              maxLength={300}
-              showCount
-            />
-          </Form.Item>
-
-          <Form.Item
-            label="Attachments"
-            name="attachments"
-            tooltip="Upload invoices, receipts, or supporting documents"
-          >
-            <Upload
-              maxCount={5}
-              accept="image/*,.pdf,.doc,.docx"
-              beforeUpload={() => false}
-              listType="text"
-            >
-              <Button icon={<UploadOutlined />}>Upload Documents</Button>
-            </Upload>
-          </Form.Item>
-
-          <Form.Item style={{ marginBottom: 0, marginTop: '24px' }}>
-            <Space style={{ float: 'right' }}>
-              <Button onClick={() => {
-                setRequestModalVisible(false);
-                form.resetFields();
-              }}>
-                Cancel
-              </Button>
-              <Button
-                type="primary"
-                htmlType="submit"
-                style={{
-                  background: 'linear-gradient(135deg, #00d084 0%, #00BFA5 100%)',
-                  border: 'none',
-                }}
-              >
-                Submit Request
-              </Button>
-            </Space>
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      {/* Details Drawer */}
-      <Drawer
-        title="Payable Details"
-        placement="right"
-        width={600}
-        open={detailsDrawerVisible}
-        onClose={() => setDetailsDrawerVisible(false)}
-      >
-        {selectedPayable && (
-          <>
-            <Descriptions column={1} bordered size="small">
-              <Descriptions.Item label="Payable ID">
-                <Text strong>{selectedPayable.id}</Text>
-              </Descriptions.Item>
-              <Descriptions.Item label="Client">
-                <Space>
-                  <UserOutlined />
-                  <Text strong>{selectedPayable.clientName}</Text>
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="Contact Person">
-                {selectedPayable.contactPerson || 'N/A'}
-              </Descriptions.Item>
-              <Descriptions.Item label="Phone">
-                <Space>
-                  <PhoneOutlined />
-                  {selectedPayable.phone || 'N/A'}
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="Email">
-                <Space>
-                  <MailOutlined />
-                  {selectedPayable.email || 'N/A'}
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="Invoice Number">
-                {selectedPayable.invoiceNumber}
-              </Descriptions.Item>
-              <Descriptions.Item label="Invoice Date">
-                {selectedPayable.invoiceDate}
-              </Descriptions.Item>
-              <Descriptions.Item label="Amount">
-                <Text strong style={{ color: '#00d084', fontSize: '16px' }}>
-                  ZWG {selectedPayable.amount.toLocaleString()}
-                </Text>
-              </Descriptions.Item>
-              <Descriptions.Item label="Due Date">
-                {selectedPayable.dueDate}
-              </Descriptions.Item>
-              <Descriptions.Item label="Collection Date">
-                <Space>
-                  <CalendarOutlined />
-                  <Text strong>{selectedPayable.collectionDate}</Text>
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="Department">
-                {selectedPayable.department}
-              </Descriptions.Item>
-              <Descriptions.Item label="Payment Method">
-                {selectedPayable.paymentMethod || 'N/A'}
-              </Descriptions.Item>
-              <Descriptions.Item label="Status">
-                <StatusTag status={selectedPayable.status} />
-              </Descriptions.Item>
-              <Descriptions.Item label="Priority">
-                <Tag color={selectedPayable.priority === 'high' ? 'red' : selectedPayable.priority === 'medium' ? 'orange' : 'blue'}>
-                  {selectedPayable.priority.toUpperCase()}
-                </Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="Description">
-                {selectedPayable.description}
-              </Descriptions.Item>
-              {selectedPayable.notes && (
-                <Descriptions.Item label="Notes">
-                  {selectedPayable.notes}
-                </Descriptions.Item>
-              )}
-              <Descriptions.Item label="Created By">
-                {selectedPayable.createdByName} on {selectedPayable.createdAt}
-              </Descriptions.Item>
-              {selectedPayable.approvedBy && (
-                <Descriptions.Item label="Approved By">
-                  {selectedPayable.approvedBy} on {selectedPayable.approvedAt}
-                </Descriptions.Item>
-              )}
-              {selectedPayable.paidBy && (
-                <Descriptions.Item label="Paid By">
-                  {selectedPayable.paidBy} on {selectedPayable.paidAt}
-                </Descriptions.Item>
-              )}
-            </Descriptions>
-
-            {selectedPayable.attachments && selectedPayable.attachments.length > 0 && (
-              <>
-                <Title level={5} style={{ marginTop: '24px', marginBottom: '12px' }}>
-                  Attachments
-                </Title>
-                <Space direction="vertical" style={{ width: '100%' }}>
-                  {selectedPayable.attachments.map((file, index) => (
-                    <div key={index} style={{ padding: '8px', background: '#f5f5f5', borderRadius: '4px' }}>
-                      <Text>{file}</Text>
-                    </div>
-                  ))}
-                </Space>
-              </>
-            )}
-
-            <div style={{ marginTop: '24px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-              {selectedPayable.status === 'pending' && (
-                <>
-                  <Button
-                    type="primary"
-                    icon={<CheckOutlined />}
-                    onClick={() => handleOpenActionModal(selectedPayable, 'approve')}
-                  >
-                    Approve
-                  </Button>
-                  <Button
-                    danger
-                    icon={<CloseOutlined />}
-                    onClick={() => handleOpenActionModal(selectedPayable, 'reject')}
-                  >
-                    Reject
-                  </Button>
-                </>
-              )}
-              {selectedPayable.status === 'approved' && (
-                <Button
-                  type="primary"
-                  icon={<CheckOutlined />}
-                  onClick={() => handleOpenActionModal(selectedPayable, 'paid')}
-                  style={{ background: '#52c41a' }}
-                >
-                  Mark as Paid
-                </Button>
-              )}
-            </div>
-          </>
-        )}
-      </Drawer>
-
-      {/* Action Modal (Approve/Reject/Paid) */}
-      <Modal
-        title={
-          actionType === 'approve'
-            ? 'Approve Payable'
-            : actionType === 'reject'
-            ? 'Reject Payable'
-            : 'Mark as Paid'
-        }
-        open={actionModalVisible}
-        onCancel={() => {
-          setActionModalVisible(false);
-          actionForm.resetFields();
-        }}
-        footer={null}
-        width={500}
-      >
-        <Form form={actionForm} layout="vertical" onFinish={handleSubmitAction}>
-          {selectedPayable && (
-            <>
-              <div style={{ marginBottom: '16px', padding: '12px', background: '#f5f5f5', borderRadius: '8px' }}>
-                <Space direction="vertical" style={{ width: '100%' }}>
-                  <Text strong>Client: {selectedPayable.clientName}</Text>
-                  <Text>Amount: ZWG {selectedPayable.amount.toLocaleString()}</Text>
-                  <Text>Collection Date: {selectedPayable.collectionDate}</Text>
-                </Space>
-              </div>
-
-              {actionType !== 'paid' && (
-                <Form.Item
-                  label="Comments"
-                  name="comment"
-                  rules={actionType === 'reject' ? [{ required: true, message: 'Please provide reason for rejection' }] : []}
-                >
-                  <TextArea
-                    rows={4}
-                    placeholder={
-                      actionType === 'approve'
-                        ? 'Add optional comments...'
-                        : 'Please provide reason for rejection...'
-                    }
-                    maxLength={500}
-                    showCount
-                  />
-                </Form.Item>
-              )}
-
-              {actionType === 'paid' && (
-                <div style={{ marginBottom: '16px' }}>
-                  <Text>
-                    Are you sure you want to mark this payable as paid? This action confirms that the payment
-                    has been successfully disbursed to the client.
-                  </Text>
-                </div>
-              )}
-            </>
-          )}
-
-          <Form.Item style={{ marginBottom: 0, marginTop: '24px' }}>
-            <Space style={{ float: 'right' }}>
-              <Button
-                onClick={() => {
-                  setActionModalVisible(false);
-                  actionForm.resetFields();
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="primary"
-                htmlType="submit"
-                danger={actionType === 'reject'}
-                style={
-                  actionType === 'approve'
-                    ? { background: 'linear-gradient(135deg, #00d084 0%, #00BFA5 100%)', border: 'none' }
-                    : actionType === 'paid'
-                    ? { background: '#52c41a', border: 'none' }
-                    : undefined
-                }
-              >
-                {actionType === 'approve' ? 'Approve' : actionType === 'reject' ? 'Reject' : 'Confirm Payment'}
-              </Button>
-            </Space>
-          </Form.Item>
-        </Form>
-      </Modal>
+      <PayableActionModal
+        key={pendingAction ? `${pendingAction.payable.id}-${pendingAction.action}` : 'none'}
+        payable={pendingAction?.payable ?? null}
+        action={pendingAction?.action ?? 'approve'}
+        onClose={() => setPendingAction(null)}
+        onApprove={handleApprove}
+        onReject={handleReject}
+        onPay={handlePay}
+      />
     </div>
   );
 };

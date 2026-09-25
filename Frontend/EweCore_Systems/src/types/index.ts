@@ -114,6 +114,8 @@ export interface ApprovalWorkflowStage {
   approval_logic: 'any' | 'all';
   is_required: boolean;
   auto_approve_conditions?: any;
+  action_type?: 'verify' | 'certify' | 'recommend' | 'approve' | 'pay' | 'review';  // NEW: Action to perform at this stage
+  target_status?: string;          // NEW: Optional target status to set when stage is approved
 }
 
 // Leave Management - Re-export from leave-ledger module
@@ -188,6 +190,7 @@ export interface PettyCashLineItem {
   quantity: number;
   unit_price: number;
   amount: number;
+  currency: 'ZWG' | 'USD';
 }
 
 export interface PettyCashRequest extends ApprovalRequest {
@@ -232,58 +235,7 @@ export interface CalendarEvent {
   color?: string;
 }
 
-export type PayableStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'scheduled' | 'paid' | 'overdue' | 'cancelled';
-
-export interface Payable {
-  id: string;
-  clientId: string;
-  clientName: string;
-  contactPerson?: string;
-  phone?: string;
-  email?: string;
-  invoiceNumber: string;
-  invoiceDate: string;
-  amount: number;
-  currency: string;
-  dueDate: string;
-  collectionDate: string; // Date when client will come to collect
-  department: string;
-  description: string;
-  status: PayableStatus;
-  priority: 'low' | 'medium' | 'high';
-  paymentMethod?: string;
-  attachments?: string[];
-  notes?: string;
-  createdBy: string;
-  createdByName: string;
-  createdAt: string;
-  updatedAt: string;
-  approvedBy?: string;
-  approvedAt?: string;
-  paidBy?: string;
-  paidAt?: string;
-}
-
-export interface PayableRequest extends ApprovalRequest {
-  data: {
-    clientId: string;
-    clientName: string;
-    contactPerson?: string;
-    phone?: string;
-    email?: string;
-    invoiceNumber: string;
-    invoiceDate: string;
-    amount: number;
-    currency: string;
-    dueDate: string;
-    collectionDate: string;
-    department: string;
-    description: string;
-    paymentMethod?: string;
-    attachments?: string[];
-    notes?: string;
-  };
-}
+// Payables types live with the API service: src/services/api/payables.ts
 
 // Receivables Types (Money coming into SACCO)
 export type ReceivableStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'scheduled' | 'partially-paid' | 'paid' | 'overdue' | 'defaulted' | 'written-off' | 'cancelled' | 'disputed';

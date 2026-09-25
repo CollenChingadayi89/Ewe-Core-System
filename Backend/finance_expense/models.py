@@ -80,6 +80,8 @@ class Expense(BaseModel):
         choices=[
             ('draft', 'Draft'),
             ('pending', 'Pending Approval'),
+            ('verified', 'Verified'),
+            ('recommended', 'Recommended'),
             ('approved', 'Approved'),
             ('rejected', 'Rejected'),
             ('paid', 'Paid'),
@@ -152,5 +154,31 @@ class Expense(BaseModel):
             models.Index(fields=['expense_date']),
         ]
 
+    def save(self, *args, **kwargs):
+        """Override save to auto-generate expense_number"""
+        if not self.expense_number:
+            # Generate expense number: EXP-YYYY-NNNNNN
+            from django.utils import timezone
+            year = timezone.now().year
+
+            # Get the last expense number for this year
+            last_expense = Expense.objects.filter(
+                expense_number__startswith=f'EXP-{year}-'
+            ).order_by('expense_number').last()
+
+            if last_expense and last_expense.expense_number:
+                # Extract the sequence number and increment
+                try:
+                    last_sequence = int(last_expense.expense_number.split('-')[-1])
+                    new_sequence = last_sequence + 1
+                except (ValueError, IndexError):
+                    new_sequence = 1
+            else:
+                new_sequence = 1
+
+            self.expense_number = f'EXP-{year}-{new_sequence:06d}'
+
+        super().save(*args, **kwargs)
+
     def __str__(self):
-        return f"{self.expense_number} - {self.employee.get_full_name()} (ZWG {self.amount})"
+        return f"{self.expense_number} - {self.employee.get_full_name()} ({self.currency} {self.amount})"

@@ -1,6 +1,6 @@
 /**
  * Payables API Service
- * Money going OUT from SACCO to vendors/suppliers.
+ * Money going OUT from the SACCO to vendors/suppliers and to members (payouts).
  * Supports approval workflows and payment tracking.
  */
 
@@ -115,13 +115,68 @@ export interface VendorCreateRequest {
 // TYPES - Payables
 // ============================================================================
 
-export interface PayableListResponse {
+export type PayeeType = 'vendor' | 'member';
+
+/** Must match core.constants.PayableCategory in the backend. */
+export const VENDOR_PAYABLE_CATEGORIES = [
+  { value: 'utilities', label: 'Utilities' },
+  { value: 'rent', label: 'Rent' },
+  { value: 'supplies', label: 'Office Supplies' },
+  { value: 'equipment', label: 'Equipment' },
+  { value: 'services', label: 'Professional Services' },
+  { value: 'maintenance', label: 'Maintenance' },
+  { value: 'insurance', label: 'Insurance' },
+  { value: 'taxes', label: 'Taxes & Fees' },
+  { value: 'salaries', label: 'Salaries & Wages' },
+  { value: 'other', label: 'Other' },
+];
+
+export const MEMBER_PAYABLE_CATEGORIES = [
+  { value: 'dividend-payout', label: 'Dividend Payout' },
+  { value: 'interest-payout', label: 'Interest Payout' },
+  { value: 'share-buyback', label: 'Share Sale / Buy-back' },
+  { value: 'savings-withdrawal', label: 'Savings Withdrawal' },
+];
+
+/** Must match CURRENCY_CHOICES in the backend. */
+export const PAYABLE_CURRENCIES = ['ZWG', 'USD'];
+
+/** Where a payable is in its approval workflow, from the viewer's point of view. */
+export interface PayableApprovalSummary {
+  id: string;
+  request_number: string;
+  status: 'pending' | 'in_progress' | 'approved' | 'rejected' | 'cancelled' | 'escalated';
+  current_stage: number;
+  total_stages: number;
+  current_stage_name: string | null;
+  /** 'approve', 'verify', 'recommend', ... or 'pay' for the payment stage */
+  current_action_type: string | null;
+  current_approver_name: string | null;
+  /** True when it is the current user's turn to act */
+  can_act: boolean;
+}
+
+/** Where the money goes. Which fields apply depends on the payment method. */
+export interface PayablePayToDetails {
+  pay_to_bank_name?: string | null;
+  pay_to_bank_branch?: string | null;
+  pay_to_account_number?: string | null;
+  pay_to_account_name?: string | null;
+  pay_to_mobile_number?: string | null;
+}
+
+/** DRF serialises DecimalFields as strings. */
+export interface PayableListResponse extends PayablePayToDetails {
   id: string;
   payable_number: string;
-  vendor: string;
-  vendor_name: string;
-  vendor_code: string;
+  payee_type: PayeeType;
+  payee_type_display: string;
+  payee_name: string;
+  payee_reference: string;
+  vendor: string | null;
+  member: string | null;
   invoice_number: string | null;
+  description: string;
   category: string;
   category_display: string;
   amount: string;
@@ -131,21 +186,24 @@ export interface PayableListResponse {
   invoice_date: string;
   due_date: string;
   collection_date: string | null;
+  paid_date: string | null;
+  payment_method: string | null;
   status: string;
   status_display: string;
   priority: string;
   is_overdue: boolean;
   submitted_by: string;
   submitted_by_name: string;
+  approved_by_name: string | null;
+  paid_by_name: string | null;
+  approval: PayableApprovalSummary | null;
+  /** True when the current user is the Pay-stage assignee and the payable is approved */
+  can_mark_paid: boolean;
   created_at: string;
   updated_at: string;
 }
 
-export interface PayableDetailResponse {
-  // Basic Info
-  id: string;
-  payable_number: string;
-  vendor: string;
+export interface PayableDetailResponse extends PayableListResponse {
   vendor_details: {
     id: string;
     vendor_code: string;
@@ -153,103 +211,48 @@ export interface PayableDetailResponse {
     contact_person: string | null;
     phone: string;
     email: string;
-    vendor_type: string;
     vendor_type_display: string;
     payment_terms: string | null;
-  };
-
-  // Invoice Details
-  invoice_number: string | null;
-  description: string;
-  category: string;
-  category_display: string;
-
-  // Amount Details
-  amount: string;
-  currency: string;
-  tax_amount: string;
-  total_amount: string;
-
-  // Dates
-  invoice_date: string;
-  due_date: string;
-  collection_date: string | null;
-  paid_date: string | null;
-
-  // Payment Details
-  payment_method: string | null;
-  payment_reference: string | null;
-
-  // Status & Approval
-  status: string;
-  status_display: string;
-  priority: string;
-  submitted_by: string;
-  submitted_by_details: {
-    id: string;
-    employee_number: string;
-    first_name: string;
-    last_name: string;
-    full_name: string;
-  };
-  current_approver: string | null;
-  current_approver_details: {
-    id: string;
-    employee_number: string;
-    first_name: string;
-    last_name: string;
-    full_name: string;
   } | null;
-  approval_chain: {
-    approver_id: string;
-    approver_name: string;
-    approved_at?: string;
-    rejected_at?: string;
-    notes?: string;
-    reason?: string;
-  }[];
+  member_details: {
+    id: string;
+    member_number: string;
+    full_name: string;
+    phone: string;
+    email: string;
+    account_status: string;
+  } | null;
+  payment_reference: string | null;
   approved_date: string | null;
   rejection_reason: string | null;
-
-  // Additional Info
   attachments: string[];
   notes: string | null;
-  is_overdue: boolean;
-
-  // Timestamps
-  created_at: string;
-  updated_at: string;
-  created_by: string;
-  modified_by: string;
 }
 
-export interface PayableCreateRequest {
-  vendor: string;
+
+export interface PayableCreateRequest extends PayablePayToDetails {
+  payee_type: PayeeType;
+  vendor?: string;
+  member?: string;
   invoice_number?: string;
   description: string;
-  category?: string;
+  category: string;
   amount: string;
-  currency?: string;
+  currency: string;
   tax_amount?: string;
-  invoice_date: string;
+  /** YYYY-MM-DD; required for vendor payables, defaults to today for member payouts */
+  invoice_date?: string;
   due_date: string;
   collection_date?: string;
   payment_method?: string;
-  payment_reference?: string;
   priority?: string;
-  attachments?: string[];
   notes?: string;
-  submitted_by: string;
-}
-
-export interface ApproveRejectRequest {
-  notes?: string;
-  reason?: string;
 }
 
 export interface MarkPaidRequest {
+  /** YYYY-MM-DD, defaults to today */
   paid_date?: string;
-  payment_method?: string;
+  payment_method: string;
   payment_reference?: string;
   notes?: string;
 }
@@ -327,12 +330,14 @@ export const payableApi = {
   list: async (params?: {
     page?: number;
     search?: string;
+    payee_type?: PayeeType;
     vendor?: string;
+    member?: string;
     category?: string;
+    currency?: string;
     status?: string;
     priority?: string;
     submitted_by?: string;
-    current_approver?: string;
     ordering?: string;
   }): Promise<PaginatedResponse<PayableListResponse>> => {
     const response = await get<PaginatedResponse<PayableListResponse>>('/payables/', { params });
@@ -356,7 +361,7 @@ export const payableApi = {
   },
 
   /**
-   * Update existing payable (draft only)
+   * Update a payable (only until an approver has acted on it)
    */
   update: async (id: string, data: Partial<PayableCreateRequest>): Promise<PayableDetailResponse> => {
     const response = await put<PayableDetailResponse>(`/payables/${id}/`, data);
@@ -380,29 +385,15 @@ export const payableApi = {
 
   // ============================================================================
   // CUSTOM ACTIONS
+  // Approve / reject go through the approval workflow:
+  // approvalRequestApi.approve/reject(payable.approval.id, ...)
   // ============================================================================
 
   /**
-   * Approve a payable
+   * Record payment and complete the workflow's Pay stage (Pay-stage assignee only)
    */
-  approve: async (id: string, data?: ApproveRejectRequest): Promise<PayableDetailResponse> => {
-    const response = await post<PayableDetailResponse>(`/payables/${id}/approve/`, data || {});
-    return response.data;
-  },
-
-  /**
-   * Reject a payable
-   */
-  reject: async (id: string, data: ApproveRejectRequest): Promise<PayableDetailResponse> => {
-    const response = await post<PayableDetailResponse>(`/payables/${id}/reject/`, data);
-    return response.data;
-  },
-
-  /**
-   * Mark payable as fully paid
-   */
-  markPaid: async (id: string, data?: MarkPaidRequest): Promise<PayableDetailResponse> => {
-    const response = await post<PayableDetailResponse>(`/payables/${id}/mark-paid/`, data || {});
+  markPaid: async (id: string, data: MarkPaidRequest): Promise<PayableDetailResponse> => {
+    const response = await post<PayableDetailResponse>(`/payables/${id}/mark-paid/`, data);
     return response.data;
   },
 };

@@ -104,6 +104,68 @@ class ReceivableStatus:
         (REJECTED, 'Rejected'),
     ]
 
+# Payables: who is being paid (money going OUT of the SACCO)
+class PayeeType:
+    VENDOR = 'vendor'
+    MEMBER = 'member'
+
+    CHOICES = [
+        (VENDOR, 'Vendor / Supplier'),
+        (MEMBER, 'SACCO Member'),
+    ]
+
+
+# Payable categories, grouped by payee type (matches frontend payables categories)
+class PayableCategory:
+    # Vendor / supplier bills
+    UTILITIES = 'utilities'
+    RENT = 'rent'
+    SUPPLIES = 'supplies'
+    EQUIPMENT = 'equipment'
+    SERVICES = 'services'
+    MAINTENANCE = 'maintenance'
+    INSURANCE = 'insurance'
+    TAXES = 'taxes'
+    SALARIES = 'salaries'
+    OTHER = 'other'
+
+    # Member payouts
+    DIVIDEND_PAYOUT = 'dividend-payout'
+    INTEREST_PAYOUT = 'interest-payout'
+    SHARE_BUYBACK = 'share-buyback'
+    SAVINGS_WITHDRAWAL = 'savings-withdrawal'
+
+    VENDOR_CHOICES = [
+        (UTILITIES, 'Utilities'),
+        (RENT, 'Rent'),
+        (SUPPLIES, 'Office Supplies'),
+        (EQUIPMENT, 'Equipment'),
+        (SERVICES, 'Professional Services'),
+        (MAINTENANCE, 'Maintenance'),
+        (INSURANCE, 'Insurance'),
+        (TAXES, 'Taxes & Fees'),
+        (SALARIES, 'Salaries & Wages'),
+        (OTHER, 'Other'),
+    ]
+    MEMBER_CHOICES = [
+        (DIVIDEND_PAYOUT, 'Dividend Payout'),
+        (INTEREST_PAYOUT, 'Interest Payout'),
+        (SHARE_BUYBACK, 'Share Sale / Buy-back'),
+        (SAVINGS_WITHDRAWAL, 'Savings Withdrawal'),
+    ]
+    CHOICES = [
+        ('Vendor / Supplier', VENDOR_CHOICES),
+        ('SACCO Member', MEMBER_CHOICES),
+    ]
+
+    VENDOR_VALUES = [value for value, _ in VENDOR_CHOICES]
+    MEMBER_VALUES = [value for value, _ in MEMBER_CHOICES]
+
+    @classmethod
+    def allowed_for(cls, payee_type):
+        return cls.MEMBER_VALUES if payee_type == PayeeType.MEMBER else cls.VENDOR_VALUES
+
+
 CURRENCY_CHOICES = [
     ('ZWG', 'ZWG - Zimbabwe Gold'),
     ('USD', 'USD - United States Dollar')

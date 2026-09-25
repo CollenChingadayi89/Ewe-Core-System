@@ -205,16 +205,30 @@ export const FinanceSettingsPage = () => {
     }
   };
 
-  const handleSaveMembers = async (addedMembers: any[], removedMemberIds: string[]) => {
+  const handleSaveMembers = async (addedMembers: any[], removedMemberIds: string[], oldGroupId?: string | null) => {
     if (!selectedGroupForMembers) return;
 
     try {
-      // Remove members first
-      for (const memberId of removedMemberIds) {
-        await financeApprovalGroupsApi.removeMember(selectedGroupForMembers.id, memberId);
+      // If employee is being moved from another group, remove from old group first
+      if (oldGroupId && addedMembers.length > 0) {
+        for (const member of addedMembers) {
+          await financeApprovalGroupsApi.removeMember(oldGroupId, member.id);
+        }
       }
 
-      // Add members
+      // Remove members from current group
+      // removedMemberIds are membership IDs, need to find employee IDs
+      const currentMembersDetail = selectedGroupForMembers.members_detail || [];
+
+      for (const membershipId of removedMemberIds) {
+        // Find the membership by ID to get the employee ID
+        const membership = currentMembersDetail.find((m: any) => m.id === membershipId);
+        if (membership && membership.employee) {
+          await financeApprovalGroupsApi.removeMember(selectedGroupForMembers.id, membership.employee);
+        }
+      }
+
+      // Add members to current group
       for (const member of addedMembers) {
         await financeApprovalGroupsApi.addMember(selectedGroupForMembers.id, {
           employee_id: member.id,
@@ -331,10 +345,35 @@ export const FinanceSettingsPage = () => {
     setWorkflowModalVisible(true);
   };
 
-  const handleEditWorkflow = (workflow: WorkflowList) => {
-    setEditingWorkflow(workflow);
-    // TODO: Load full workflow details and populate form
-    setWorkflowModalVisible(true);
+  const handleEditWorkflow = async (workflow: WorkflowList) => {
+    try {
+      setEditingWorkflow(workflow);
+
+      // Load full workflow details including stages and groups
+      const fullWorkflow: WorkflowDetail = await financeWorkflowsApi.retrieve(workflow.id);
+
+      // Extract applicable group IDs from the detail objects
+      const applicableGroupIds = fullWorkflow.applicable_groups_detail?.map(g => g.id) || [];
+
+      // Populate form with workflow data
+      workflowForm.setFieldsValue({
+        workflow_name: fullWorkflow.workflow_name,
+        description: fullWorkflow.description,
+        workflow_type: fullWorkflow.workflow_type,
+        stages: fullWorkflow.stages || [],
+        applicable_group_ids: applicableGroupIds,
+        is_active: fullWorkflow.is_active,
+        allow_parallel_approval: fullWorkflow.allow_parallel_approval,
+        require_sequential: fullWorkflow.require_sequential,
+        escalation_enabled: fullWorkflow.escalation_enabled,
+        escalation_hours: fullWorkflow.escalation_hours,
+      });
+
+      setWorkflowModalVisible(true);
+    } catch (error: any) {
+      console.error('Failed to load workflow details:', error);
+      message.error('Failed to load workflow details');
+    }
   };
 
   const handleSaveWorkflow = async (values: any) => {
@@ -361,6 +400,7 @@ export const FinanceSettingsPage = () => {
       }
 
       setWorkflowModalVisible(false);
+      setEditingWorkflow(null);
       workflowForm.resetFields();
       loadWorkflows();
     } catch (error: any) {
@@ -386,8 +426,17 @@ export const FinanceSettingsPage = () => {
       message.success('Workflow deleted successfully');
       loadWorkflows();
     } catch (error: any) {
-      console.error('Failed to delete workflow:', error);
-      message.error('Failed to delete workflow');
+      // Extract user-friendly error message from backend response
+      const errorMessage = error.response?.data?.error || 'Failed to delete workflow';
+
+      // Log to console for debugging (not visible to end user)
+      console.error('Workflow deletion failed:', errorMessage);
+
+      // Show user-friendly message with longer duration (10 seconds)
+      message.error({
+        content: errorMessage,
+        duration: 10,
+      });
     }
   };
 
@@ -467,11 +516,14 @@ export const FinanceSettingsPage = () => {
     {
       title: 'Actions',
       key: 'actions',
-      width: 250,
+      width: 300,
       render: (_, record) => (
         <Space>
           <Button size="small" onClick={() => handleToggleWorkflowActive(record.id)}>
             {record.is_active ? 'Deactivate' : 'Activate'}
+          </Button>
+          <Button size="small" icon={<EditOutlined />} onClick={() => handleEditWorkflow(record)}>
+            Edit
           </Button>
           <Button size="small" icon={<CopyOutlined />} onClick={() => handleDuplicateWorkflow(record.id, record.workflow_name)}>
             Duplicate
@@ -639,11 +691,12 @@ export const FinanceSettingsPage = () => {
         open={workflowModalVisible}
         onCancel={() => {
           setWorkflowModalVisible(false);
+          setEditingWorkflow(null);
           workflowForm.resetFields();
         }}
         onOk={workflowForm.submit}
         width={900}
-        okText="Save"
+        okText={editingWorkflow ? 'Update Workflow' : 'Create Workflow'}
       >
         <Form form={workflowForm} layout="vertical" onFinish={handleSaveWorkflow}>
           {/* Workflow Name */}
@@ -773,10 +826,33 @@ export const FinanceSettingsPage = () => {
                           rules={[{ required: true, message: 'Required' }]}
                         >
                           <Select placeholder="Select action type">
+                            <Option value="verify">Verify (Initial verification)</Option>
                             <Option value="certify">Certify (Verify accuracy)</Option>
                             <Option value="recommend">Recommend (Give opinion)</Option>
                             <Option value="approve">Approve (Final decision)</Option>
+                            <Option value="pay">Pay (Process payment)</Option>
                             <Option value="review">Review (Check & comment)</Option>
+                          </Select>
+                        </Form.Item>
+                      </Col>
+                    </Row>
+
+                    {/* Target Status (Optional) */}
+                    <Row gutter={16}>
+                      <Col span={24}>
+                        <Form.Item
+                          {...field}
+                          label="Target Status (Optional)"
+                          name={[field.name, 'target_status']}
+                          tooltip="Status to set when this stage is approved. If not set, will use default based on action type."
+                        >
+                          <Select placeholder="Select target status (optional)" allowClear>
+                            <Option value="draft">Draft</Option>
+                            <Option value="pending">Pending</Option>
+                            <Option value="verified">Verified</Option>
+                            <Option value="recommended">Recommended</Option>
+                            <Option value="approved">Approved</Option>
+                            <Option value="paid">Paid</Option>
                           </Select>
                         </Form.Item>
                       </Col>

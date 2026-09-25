@@ -1,7 +1,10 @@
+from django.contrib.contenttypes.fields import GenericRelation
 from django.db import models
 from django.conf import settings
 from core.models import BaseModel
-from core.constants import ApprovalStatus, CURRENCY_CHOICES, PRIORITY_CHOICES
+from core.constants import (
+    ApprovalStatus, CURRENCY_CHOICES, PRIORITY_CHOICES, PayableCategory, PayeeType,
+)
 
 
 class Vendor(BaseModel):
@@ -84,8 +87,9 @@ class Vendor(BaseModel):
 
 class Payable(BaseModel):
     """
-    Money going OUT from SACCO to vendors/suppliers.
-    Represents bills, invoices, and payments to be made.
+    Money going OUT from the SACCO.
+    The payee is either a vendor/supplier (bills, invoices) or a SACCO member
+    (dividends, interest, share buy-backs, savings withdrawals).
     """
     payable_number = models.CharField(
         max_length=50,
@@ -94,12 +98,28 @@ class Payable(BaseModel):
         help_text='Unique identifier (e.g., PAY-2026-000001)'
     )
 
-    # Vendor Information
+    # Payee (exactly one of vendor/member, matching payee_type — enforced by constraint)
+    payee_type = models.CharField(
+        max_length=10,
+        choices=PayeeType.CHOICES,
+        default=PayeeType.VENDOR,
+        verbose_name='Payee Type'
+    )
     vendor = models.ForeignKey(
         Vendor,
         on_delete=models.PROTECT,
+        blank=True,
+        null=True,
         related_name='payables',
         verbose_name='Vendor'
+    )
+    member = models.ForeignKey(
+        'sacco_member.Member',
+        on_delete=models.PROTECT,
+        blank=True,
+        null=True,
+        related_name='payables',
+        verbose_name='Member'
     )
 
     # Invoice/Bill Details
@@ -113,19 +133,8 @@ class Payable(BaseModel):
     description = models.TextField(verbose_name='Description')
     category = models.CharField(
         max_length=50,
-        choices=[
-            ('utilities', 'Utilities'),
-            ('rent', 'Rent'),
-            ('supplies', 'Office Supplies'),
-            ('equipment', 'Equipment'),
-            ('services', 'Professional Services'),
-            ('maintenance', 'Maintenance'),
-            ('insurance', 'Insurance'),
-            ('taxes', 'Taxes & Fees'),
-            ('salaries', 'Salaries & Wages'),
-            ('other', 'Other')
-        ],
-        default='other',
+        choices=PayableCategory.CHOICES,
+        default=PayableCategory.OTHER,
         verbose_name='Category'
     )
 
@@ -181,6 +190,19 @@ class Payable(BaseModel):
         help_text='Transaction reference number'
     )
 
+    # Where the money goes (captured on the request, so approvers see exactly what is paid out)
+    pay_to_bank_name = models.CharField(max_length=100, blank=True, null=True, verbose_name='Bank Name')
+    pay_to_bank_branch = models.CharField(max_length=100, blank=True, null=True, verbose_name='Bank Branch')
+    pay_to_account_number = models.CharField(max_length=50, blank=True, null=True, verbose_name='Account Number')
+    pay_to_account_name = models.CharField(max_length=100, blank=True, null=True, verbose_name='Account Holder Name')
+    pay_to_mobile_number = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        verbose_name='Mobile Money Number',
+        help_text='EcoCash / OneMoney / InnBucks number for mobile money payments'
+    )
+
     # Status & Approval
     status = models.CharField(
         max_length=20,
@@ -224,8 +246,34 @@ class Payable(BaseModel):
         verbose_name='Approval Chain',
         help_text='Array of approval steps with approver details'
     )
+    approved_by = models.ForeignKey(
+        'hr_employee.Employee',
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='approved_payables',
+        verbose_name='Approved By',
+        help_text='Set by the approval workflow on final approval'
+    )
     approved_date = models.DateTimeField(blank=True, null=True, verbose_name='Approved Date')
     rejection_reason = models.TextField(blank=True, null=True, verbose_name='Rejection Reason')
+    paid_by = models.ForeignKey(
+        'hr_employee.Employee',
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='paid_payables',
+        verbose_name='Paid By',
+        help_text='Pay-stage assignee who recorded the payment'
+    )
+
+    # Approval requests for this payable (the approval workflow is the source of truth)
+    approval_requests = GenericRelation(
+        'approval.ApprovalRequest',
+        content_type_field='content_type',
+        object_id_field='object_id',
+        related_query_name='payable',
+    )
 
     # Attachments
     attachments = models.JSONField(
@@ -246,12 +294,46 @@ class Payable(BaseModel):
         indexes = [
             models.Index(fields=['payable_number']),
             models.Index(fields=['vendor', 'status']),
+            models.Index(fields=['member', 'status']),
             models.Index(fields=['due_date', 'status']),
             models.Index(fields=['status', 'current_approver']),
         ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(payee_type=PayeeType.VENDOR, vendor__isnull=False, member__isnull=True)
+                    | models.Q(payee_type=PayeeType.MEMBER, member__isnull=False, vendor__isnull=True)
+                ),
+                name='payable_payee_matches_type',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(payee_type=PayeeType.VENDOR, category__in=PayableCategory.VENDOR_VALUES)
+                    | models.Q(payee_type=PayeeType.MEMBER, category__in=PayableCategory.MEMBER_VALUES)
+                ),
+                name='payable_category_matches_payee',
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.payable_number} - {self.vendor.company_name} (ZWG {self.total_amount})"
+        return f"{self.payable_number} - {self.payee_name} ({self.currency} {self.total_amount})"
+
+    @property
+    def payee(self):
+        return self.member if self.payee_type == PayeeType.MEMBER else self.vendor
+
+    @property
+    def payee_name(self) -> str:
+        if self.payee_type == PayeeType.MEMBER:
+            return self.member.get_full_name() if self.member else ''
+        return self.vendor.company_name if self.vendor else ''
+
+    @property
+    def payee_reference(self) -> str:
+        """Vendor code or member number."""
+        if self.payee_type == PayeeType.MEMBER:
+            return self.member.member_number if self.member else ''
+        return self.vendor.vendor_code if self.vendor else ''
 
     def save(self, *args, **kwargs):
         """Auto-calculate total amount"""

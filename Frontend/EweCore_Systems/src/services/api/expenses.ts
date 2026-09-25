@@ -3,8 +3,9 @@
  * Handles expense reimbursement requests
  */
 
-import { apiClient } from './client';
+import { apiClient, postFormData } from './client';
 import type { PaginatedResponse } from './types';
+import type { UploadFile } from 'antd';
 
 // ============================================================================
 // TYPES
@@ -48,12 +49,14 @@ export interface ExpenseDetailResponse extends ExpenseListResponse {
 }
 
 export interface ExpenseCreateRequest {
+  employee: string;
   category: string;
   description: string;
   amount: number;
   currency?: string;
   expense_date: string;
   receipt_number?: string;
+  payment_method?: string;
   attachments?: string[];
   status?: string;
   priority?: string;
@@ -110,10 +113,34 @@ export const expenseApi = {
 
   /**
    * Create new expense request
+   * Supports file uploads via FormData
    */
-  create: async (data: ExpenseCreateRequest): Promise<ExpenseDetailResponse> => {
-    const response = await apiClient.post('/expenses/', data);
-    return response.data;
+  create: async (data: ExpenseCreateRequest, files?: UploadFile[]): Promise<ExpenseDetailResponse> => {
+    // If there are files, use FormData, otherwise use regular JSON
+    if (files && files.length > 0) {
+      const formData = new FormData();
+
+      // Append all expense data fields
+      Object.entries(data).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && key !== 'attachments') {
+          formData.append(key, String(value));
+        }
+      });
+
+      // Append file uploads
+      files.forEach((file) => {
+        if (file.originFileObj) {
+          formData.append('attachments', file.originFileObj);
+        }
+      });
+
+      const response = await postFormData<ExpenseDetailResponse>('/expenses/', formData);
+      return response.data;
+    } else {
+      // No files, use regular JSON POST
+      const response = await apiClient.post('/expenses/', data);
+      return response.data;
+    }
   },
 
   /**

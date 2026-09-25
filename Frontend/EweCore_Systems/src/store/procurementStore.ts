@@ -10,6 +10,7 @@ import type {
   ProcurementListResponse,
   ProcurementDetailResponse,
   ProcurementCreateRequest,
+  ProcurementUpdateRequest,
   ProcurementFilters,
 } from '../services/api/procurement';
 import { message } from 'antd';
@@ -31,8 +32,8 @@ interface ProcurementState {
   // Actions
   fetchRequests: (filters?: ProcurementFilters) => Promise<void>;
   fetchRequestById: (id: string) => Promise<void>;
-  createRequest: (data: ProcurementCreateRequest) => Promise<ProcurementDetailResponse | null>;
-  updateRequest: (id: string, data: Partial<ProcurementCreateRequest>) => Promise<ProcurementDetailResponse | null>;
+  createRequest: (data: ProcurementCreateRequest, quotationDocuments: File[]) => Promise<ProcurementDetailResponse | null>;
+  updateRequest: (id: string, data: ProcurementUpdateRequest) => Promise<ProcurementDetailResponse | null>;
   deleteRequest: (id: string) => Promise<boolean>;
 
   // Utility
@@ -119,11 +120,11 @@ export const useProcurementStore = create<ProcurementState>()(
         }
       },
 
-      createRequest: async (data: ProcurementCreateRequest) => {
+      createRequest: async (data: ProcurementCreateRequest, quotationDocuments: File[]) => {
         set({ loading: true, error: null });
 
         try {
-          const response = await procurementApi.create(data);
+          const response = await procurementApi.create(data, quotationDocuments);
 
           set(state => ({
             procurementRequests: [response, ...state.procurementRequests],
@@ -143,7 +144,7 @@ export const useProcurementStore = create<ProcurementState>()(
         }
       },
 
-      updateRequest: async (id: string, data: Partial<ProcurementCreateRequest>) => {
+      updateRequest: async (id: string, data: ProcurementUpdateRequest) => {
         set({ loading: true, error: null });
 
         try {

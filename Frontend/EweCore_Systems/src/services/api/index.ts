@@ -31,6 +31,7 @@ export { leaveApi } from './leave';
 // Export finance services
 export { receivableApi, receivablePaymentApi } from './receivables';
 export { payableApi } from './payables';
+export { memberApi } from './members';
 export { invoiceApi, estimateApi, paymentApi } from './finance-documents';
 export { expenseApi } from './expenses';
 export { pettyCashApi } from './petty-cash';

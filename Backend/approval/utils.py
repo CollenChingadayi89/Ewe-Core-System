@@ -182,11 +182,11 @@ def get_appropriate_workflow(workflow_type, requester, priority='medium', amount
 
         # Check amount conditions
         if conditions_met and amount is not None:
-            if 'min_amount' in conditions:
+            if 'min_amount' in conditions and conditions['min_amount'] is not None:
                 if amount < Decimal(str(conditions['min_amount'])):
                     conditions_met = False
 
-            if conditions_met and 'max_amount' in conditions:
+            if conditions_met and 'max_amount' in conditions and conditions['max_amount'] is not None:
                 if amount > Decimal(str(conditions['max_amount'])):
                     conditions_met = False
 
@@ -226,9 +226,10 @@ def determine_first_approver(workflow, requester):
     Determine the first approver based on workflow configuration.
 
     NEW: Supports 'group' approver type for group-based approvals.
+    FIXED: Works with any stage, not just stage 1 (for MockWorkflow with single stage)
 
     Args:
-        workflow: ApprovalWorkflow instance
+        workflow: ApprovalWorkflow instance or MockWorkflow
         requester: Employee requesting approval
 
     Returns:
@@ -237,8 +238,12 @@ def determine_first_approver(workflow, requester):
     if not workflow.stages:
         return None
 
-    # Get first stage
-    first_stage = next((s for s in workflow.stages if s['stage_number'] == 1), None)
+    # Get first stage (if multiple stages exist) or the only stage (for MockWorkflow)
+    # Try to get stage 1 first, otherwise get the first available stage
+    first_stage = next((s for s in workflow.stages if s.get('stage_number') == 1), None)
+    if not first_stage:
+        # Fallback: get first stage in the list (for MockWorkflow or any workflow)
+        first_stage = workflow.stages[0] if workflow.stages else None
 
     if not first_stage:
         return None
@@ -272,7 +277,7 @@ def determine_first_approver(workflow, requester):
             return None
 
     # ========================================================================
-    # Position-based: requester's manager
+    # Position-based: requester's manager OR specific employees
     # ========================================================================
     elif approver_type == 'position':
         approver_position = first_stage.get('approver_position')
@@ -282,6 +287,15 @@ def determine_first_approver(workflow, requester):
         elif approver_position == 'supervisor':
             # Could traverse up hierarchy if needed
             return requester.reports_to
+        else:
+            # Fallback: check if specific employees are listed
+            approver_ids = first_stage.get('approver_employee_ids', [])
+            if approver_ids:
+                first_approver = Employee.objects.filter(
+                    id__in=approver_ids,
+                    is_active=True
+                ).first()
+                return first_approver
 
     # ========================================================================
     # Role-based: first employee with that role
@@ -352,10 +366,12 @@ def generate_request_summary(content_object, workflow_type):
         return "Expense Request"
 
     elif workflow_type == 'payable':
-        # Payable object
-        if hasattr(content_object, 'vendor') and hasattr(content_object, 'total_amount'):
-            vendor_name = content_object.vendor.company_name if content_object.vendor else "Vendor"
-            return f"Payment to {vendor_name}: ZWG {content_object.total_amount:,.2f}"
+        # Payable object (payee is a vendor or a SACCO member)
+        if hasattr(content_object, 'payee_name') and hasattr(content_object, 'total_amount'):
+            return (
+                f"Payment to {content_object.payee_name} ({content_object.get_category_display()}): "
+                f"{content_object.currency} {content_object.total_amount:,.2f}"
+            )
         return "Payable Request"
 
     elif workflow_type == 'receivable':
@@ -387,25 +403,95 @@ def generate_request_summary(content_object, workflow_type):
     return f"{workflow_type.replace('_', ' ').title()} Request"
 
 
-def update_content_object_status(approval_request, new_status):
+def update_content_object_status(approval_request, approved_step=None, action='approve'):
     """
-    Update the status of the content object when approval request status changes.
+    Update content object status based on workflow stage configuration.
 
     Args:
         approval_request: ApprovalRequest instance
-        new_status: New status ('approved', 'rejected', 'cancelled')
+        approved_step: The ApprovalStep that was just approved/rejected (optional)
+        action: 'approve', 'reject', or 'cancel'
 
     Example:
-        update_content_object_status(approval_request, 'approved')
+        update_content_object_status(approval_request, approved_step=current_step, action='approve')
     """
+    from django.db import transaction
+
     content_object = approval_request.content_object
 
-    if not content_object:
+    if not content_object or not hasattr(content_object, 'status'):
         return
 
-    # Only update if content object has a status field
-    if hasattr(content_object, 'status'):
-        content_object.status = new_status
+    with transaction.atomic():
+        if action == 'reject':
+            # Any rejection sets status to 'rejected'
+            content_object.status = 'rejected'
+            if approved_step and hasattr(content_object, 'rejection_reason'):
+                content_object.rejection_reason = approved_step.comments or 'Rejected'
+
+        elif action == 'cancel':
+            # Cancellation sets status to 'cancelled'
+            content_object.status = 'cancelled'
+
+        elif action == 'approve' and approved_step:
+            # Get workflow stages configuration
+            workflow = approval_request.workflow
+            if not workflow or not workflow.stages:
+                # Fallback for workflows without stages
+                if approval_request.status == 'approved':
+                    content_object.status = 'approved'
+                content_object.save()
+                return
+
+            # Find the stage configuration for this step
+            current_stage_config = None
+            for stage in workflow.stages:
+                if stage.get('stage_number') == approved_step.stage_number:
+                    current_stage_config = stage
+                    break
+
+            if not current_stage_config:
+                content_object.save()
+                return
+
+            # Priority 1: Use configured target_status if set
+            target_status = current_stage_config.get('target_status')
+
+            # Priority 2: Fallback to action_type-based mapping
+            if not target_status:
+                action_type = current_stage_config.get('action_type') or approved_step.action_type
+                ACTION_STATUS_MAP = {
+                    'verify': 'verified',
+                    'certify': 'certified',
+                    'recommend': 'recommended',
+                    'approve': 'approved',
+                    'pay': 'paid',
+                    'review': 'in_review',
+                }
+                target_status = ACTION_STATUS_MAP.get(action_type)
+
+            # A stage may name a status the object doesn't have (e.g. 'verified' on a payable);
+            # completing the final stage then just means 'approved'.
+            valid_statuses = {value for value, _ in content_object._meta.get_field('status').choices or []}
+            if target_status and valid_statuses and target_status not in valid_statuses:
+                target_status = 'approved'
+
+            # Update status if mapping found
+            if target_status:
+                content_object.status = target_status
+
+                # Update approval metadata for 'approved' status
+                if target_status == 'approved' and hasattr(content_object, 'approved_by'):
+                    from django.utils import timezone
+                    content_object.approved_by = approved_step.approver
+                    content_object.approved_date = timezone.now()
+
+                # Update payment metadata for 'paid' status
+                elif target_status == 'paid' and hasattr(content_object, 'paid_date'):
+                    from django.utils import timezone
+                    if not content_object.paid_date:
+                        content_object.paid_date = timezone.now().date()
+
         content_object.save()
 
 
@@ -815,26 +901,15 @@ def advance_approval_stage(approval_request):
         approval_request.final_approval_date = timezone.now()
         approval_request.save(update_fields=['current_approver', 'status', 'final_approval_date'])
 
-        # Update the original object
-        update_content_object_status(approval_request, 'approved')
+        # Update the original object (final approval - no specific step)
+        # Set status to 'approved' since all stages are complete
+        content_object = approval_request.content_object
+        if hasattr(content_object, 'status'):
+            content_object.status = 'approved'
+            content_object.save(update_fields=['status'])
 
         # Send final notification
         notify_final_approval(approval_request)
-
-
-def update_content_object_status(approval_request, new_status):
-    """
-    Update the status of the object being approved.
-
-    Args:
-        approval_request: ApprovalRequest instance
-        new_status: New status to set ('approved' or 'rejected')
-    """
-    content_object = approval_request.content_object
-
-    if hasattr(content_object, 'status'):
-        content_object.status = new_status
-        content_object.save(update_fields=['status'])
 
 
 def notify_approval_action(approval_step, action_type='approved'):

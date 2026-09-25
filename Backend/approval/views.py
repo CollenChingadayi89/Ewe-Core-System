@@ -23,15 +23,12 @@ from .serializers import (
     ApprovalStepSerializer,
     NotificationSerializer
 )
+from .services import ApprovalActionError, approve_current_stage, reject_current_stage
 from .utils import (
     update_content_object_status,
-    determine_first_approver,
     notify_approval_required,
-    notify_request_approved,
-    notify_request_rejected,
     notify_request_cancelled,
     notify_request_escalated,
-    notify_stage_advanced,
     notify_request_created
 )
 
@@ -347,169 +344,20 @@ class ApprovalRequestViewSet(viewsets.ModelViewSet):
             "comments": "Optional approval comments"
         }
 
-        Behavior:
-        1. Verify user is current approver
-        2. Create ApprovalStep record with approved status
-        3. Check if more stages remain:
-           - If yes: Advance to next stage
-           - If no: Mark request as fully approved
-        4. Update content_object status (if applicable)
+        Advances to the next stage, or marks the request fully approved and updates
+        the content object's status. See approval.services.approve_current_stage.
         """
         approval_request = self.get_object()
-        comments = request.data.get('comments', '')
-
-        # Get current user's employee profile
-        try:
-            approver_employee = request.user.employee_profile
-        except AttributeError:
+        approver = getattr(request.user, 'employee_profile', None)
+        if approver is None:
             return Response(
                 {'error': 'User does not have an employee profile'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        # Verify user is current approver
-        if approval_request.current_approver != approver_employee:
-            return Response(
-                {'error': 'You are not the current approver for this request'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        # Check if request is in a state that can be approved
-        if approval_request.status not in ['pending', 'in_progress']:
-            return Response(
-                {'error': f'Cannot approve request with status: {approval_request.status}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        with transaction.atomic():
-            # Get workflow stages
-            workflow = approval_request.workflow
-            if not workflow:
-                return Response(
-                    {'error': 'Approval request has no workflow configured'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            stages = workflow.stages
-            current_stage_number = approval_request.current_stage
-
-            # Find current stage configuration
-            current_stage = next(
-                (s for s in stages if s['stage_number'] == current_stage_number),
-                None
-            )
-
-            if not current_stage:
-                return Response(
-                    {'error': f'Stage {current_stage_number} not found in workflow'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Create approval step record
-            approval_step = ApprovalStep.objects.create(
-                approval_request=approval_request,
-                stage_number=current_stage_number,
-                stage_name=current_stage['stage_name'],
-                approver=approver_employee,
-                status='approved',
-                decision_date=timezone.now(),
-                comments=comments
-            )
-
-            # Check approval logic
-            approval_logic = current_stage.get('approval_logic', 'any')
-
-            if approval_logic == 'all':
-                # Need ALL approvers to approve
-                # Count approved steps for this stage
-                approved_count = ApprovalStep.objects.filter(
-                    approval_request=approval_request,
-                    stage_number=current_stage_number,
-                    status='approved'
-                ).count()
-
-                # Get number of required approvers (based on approver_employee_ids)
-                required_approvers = len(current_stage.get('approver_employee_ids', []))
-
-                if approved_count < required_approvers:
-                    # Still waiting for other approvers
-                    approval_request.status = 'in_progress'
-                    approval_request.save()
-
-                    serializer = ApprovalRequestDetailSerializer(approval_request)
-                    return Response(serializer.data)
-
-            # Stage is approved, check if there are more stages
-            next_stage_number = current_stage_number + 1
-            next_stage = next(
-                (s for s in stages if s['stage_number'] == next_stage_number),
-                None
-            )
-
-            if next_stage and next_stage.get('is_required', True):
-                # Check auto-approve conditions
-                auto_conditions = next_stage.get('auto_approve_conditions')
-                should_auto_approve = False
-
-                if auto_conditions:
-                    amount = float(approval_request.amount or 0)
-                    if 'amount_less_than' in auto_conditions:
-                        if amount < auto_conditions['amount_less_than']:
-                            should_auto_approve = True
-
-                if should_auto_approve:
-                    # Auto-approve next stage
-                    ApprovalStep.objects.create(
-                        approval_request=approval_request,
-                        stage_number=next_stage_number,
-                        stage_name=next_stage['stage_name'],
-                        approver=approver_employee,
-                        status='approved',
-                        decision_date=timezone.now(),
-                        comments='Auto-approved based on workflow conditions'
-                    )
-
-                    # Recursively check next stage
-                    approval_request.current_stage = next_stage_number + 1
-                    approval_request.status = 'in_progress'
-                    approval_request.save()
-
-                    # Call approve again to handle next stage
-                    return self.approve(request, pk)
-                else:
-                    # Advance to next stage
-                    approval_request.current_stage = next_stage_number
-                    approval_request.status = 'in_progress'
-
-                    # Determine approver for next stage
-                    next_approver = self._determine_stage_approver(
-                        workflow,
-                        next_stage,
-                        approval_request.requester
-                    )
-
-                    approval_request.current_approver = next_approver
-                    approval_request.save()
-
-                    # Notify new approver
-                    if next_approver:
-                        notify_stage_advanced(
-                            approval_request,
-                            next_approver,
-                            next_stage['stage_name']
-                        )
-            else:
-                # No more stages, request is fully approved
-                approval_request.status = 'approved'
-                approval_request.final_approval_date = timezone.now()
-                approval_request.current_approver = None
-                approval_request.save()
-
-                # Update content_object status
-                update_content_object_status(approval_request, 'approved')
-
-                # Notify requester
-                notify_request_approved(approval_request, approver_employee)
+        try:
+            approve_current_stage(approval_request, approver, request.data.get('comments', ''))
+        except ApprovalActionError as exc:
+            return Response({'error': exc.message}, status=exc.status_code)
 
         serializer = ApprovalRequestDetailSerializer(approval_request)
         return Response(serializer.data)
@@ -528,82 +376,25 @@ class ApprovalRequestViewSet(viewsets.ModelViewSet):
             "comments": "Required rejection reason"
         }
 
-        Behavior:
-        1. Verify user is current approver
-        2. Create ApprovalStep record with rejected status
-        3. Mark request as rejected
-        4. Update content_object status (if applicable)
+        See approval.services.reject_current_stage.
         """
         approval_request = self.get_object()
         comments = request.data.get('comments', '')
-
         if not comments:
             return Response(
                 {'error': 'Rejection reason (comments) is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        # Get current user's employee profile
-        try:
-            approver_employee = request.user.employee_profile
-        except AttributeError:
+        approver = getattr(request.user, 'employee_profile', None)
+        if approver is None:
             return Response(
                 {'error': 'User does not have an employee profile'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        # Verify user is current approver
-        if approval_request.current_approver != approver_employee:
-            return Response(
-                {'error': 'You are not the current approver for this request'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        # Check if request is in a state that can be rejected
-        if approval_request.status not in ['pending', 'in_progress']:
-            return Response(
-                {'error': f'Cannot reject request with status: {approval_request.status}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        with transaction.atomic():
-            # Get workflow stages
-            workflow = approval_request.workflow
-            if workflow:
-                stages = workflow.stages
-                current_stage_number = approval_request.current_stage
-
-                # Find current stage configuration
-                current_stage = next(
-                    (s for s in stages if s['stage_number'] == current_stage_number),
-                    None
-                )
-
-                # Create approval step record
-                if current_stage:
-                    ApprovalStep.objects.create(
-                        approval_request=approval_request,
-                        stage_number=current_stage_number,
-                        stage_name=current_stage['stage_name'],
-                        approver=approver_employee,
-                        status='rejected',
-                        decision_date=timezone.now(),
-                        comments=comments
-                    )
-
-            # Mark request as rejected
-            approval_request.status = 'rejected'
-            approval_request.rejection_date = timezone.now()
-            approval_request.rejection_reason = comments
-            approval_request.rejected_by = approver_employee
-            approval_request.current_approver = None
-            approval_request.save()
-
-            # Update content_object status
-            update_content_object_status(approval_request, 'rejected')
-
-            # Notify requester
-            notify_request_rejected(approval_request, approver_employee, comments)
+        try:
+            reject_current_stage(approval_request, approver, comments)
+        except ApprovalActionError as exc:
+            return Response({'error': exc.message}, status=exc.status_code)
 
         serializer = ApprovalRequestDetailSerializer(approval_request)
         return Response(serializer.data)
@@ -671,8 +462,8 @@ class ApprovalRequestViewSet(viewsets.ModelViewSet):
             approval_request.current_approver = None
             approval_request.save()
 
-            # Update content_object status
-            update_content_object_status(approval_request, 'cancelled')
+            # Update content_object status (no approval step for cancellation)
+            update_content_object_status(approval_request, approved_step=None, action='cancel')
 
             # Notify previous approver if exists
             if previous_approver:
@@ -774,34 +565,6 @@ class ApprovalRequestViewSet(viewsets.ModelViewSet):
 
         serializer = ApprovalRequestDetailSerializer(approval_request)
         return Response(serializer.data)
-
-    # ============================================================================
-    # HELPER METHODS
-    # ============================================================================
-
-    def _determine_stage_approver(self, workflow, stage_config, requester):
-        """
-        Determine approver for a specific stage based on stage configuration.
-
-        Args:
-            workflow: ApprovalWorkflow instance
-            stage_config: Stage configuration dict from workflow.stages
-            requester: Employee who requested approval
-
-        Returns:
-            Employee instance or None
-        """
-        # Create a mock workflow object with just this stage for determine_first_approver
-        class MockWorkflow:
-            def __init__(self, stages):
-                self.stages = stages
-
-        mock_workflow = MockWorkflow([stage_config])
-
-        # Use existing utility function
-        approver = determine_first_approver(mock_workflow, requester)
-
-        return approver
 
 
 class ApprovalStepViewSet(viewsets.ReadOnlyModelViewSet):

@@ -240,15 +240,12 @@ class FinanceWorkflowCreateUpdateSerializer(serializers.ModelSerializer):
         if len(value) == 0:
             raise serializers.ValidationError("At least one approval stage is required")
 
-        # Validate stage numbers are sequential
-        stage_numbers = [s.get('stage_number') for s in value]
-        if sorted(stage_numbers) != list(range(1, len(value) + 1)):
-            raise serializers.ValidationError("Stage numbers must be sequential starting from 1")
+        # Auto-assign stage numbers based on array order
+        for idx, stage in enumerate(value, start=1):
+            stage['stage_number'] = idx
 
         # Validate each stage has required fields
         for stage in value:
-            if 'stage_number' not in stage:
-                raise serializers.ValidationError("Each stage must have a stage_number")
             if 'stage_name' not in stage:
                 raise serializers.ValidationError("Each stage must have a stage_name")
             if 'approver_type' not in stage:

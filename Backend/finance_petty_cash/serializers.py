@@ -9,6 +9,7 @@ class PettyCashSerializer(serializers.ModelSerializer):
     employee_name = serializers.SerializerMethodField()
     employee_number = serializers.SerializerMethodField()
     employee_department = serializers.SerializerMethodField()
+    verified_by_name = serializers.SerializerMethodField()
     approved_by_name = serializers.SerializerMethodField()
     disbursed_by_name = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
@@ -23,9 +24,10 @@ class PettyCashSerializer(serializers.ModelSerializer):
             'employee_department', 'amount', 'currency', 'currency_display', 'purpose',
             'line_items', 'category', 'category_display', 'justification', 'receipt_expected',
             'account_code', 'request_date', 'required_by_date', 'status', 'status_display',
-            'priority', 'priority_display', 'approved_by', 'approved_by_name',
-            'approved_date', 'rejection_reason', 'disbursed_by', 'disbursed_by_name',
-            'disbursed_date', 'receipt_number', 'notes', 'created_at', 'updated_at'
+            'priority', 'priority_display', 'verified_by', 'verified_by_name', 'verified_date',
+            'approved_by', 'approved_by_name', 'approved_date', 'rejection_reason',
+            'disbursed_by', 'disbursed_by_name', 'disbursed_date', 'receipt_number',
+            'notes', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'petty_cash_number', 'request_date', 'created_at', 'updated_at']
 
@@ -42,6 +44,10 @@ class PettyCashSerializer(serializers.ModelSerializer):
         if obj.employee and hasattr(obj.employee, 'department'):
             return obj.employee.department.name if obj.employee.department else None
         return None
+
+    def get_verified_by_name(self, obj):
+        """Get name of verifier"""
+        return obj.verified_by.get_full_name() if obj.verified_by else None
 
     def get_approved_by_name(self, obj):
         """Get name of approver"""
@@ -66,10 +72,14 @@ class PettyCashSerializer(serializers.ModelSerializer):
             if not isinstance(item, dict):
                 raise serializers.ValidationError(f'Line item {idx + 1} must be an object')
 
-            required_fields = ['description', 'quantity', 'unit_price', 'amount']
+            required_fields = ['description', 'quantity', 'unit_price', 'amount', 'currency']
             for field in required_fields:
                 if field not in item:
                     raise serializers.ValidationError(f'Line item {idx + 1} missing required field: {field}')
+
+            # Validate currency field
+            if item['currency'] not in ['ZWG', 'USD']:
+                raise serializers.ValidationError(f'Line item {idx + 1}: currency must be either ZWG or USD')
 
             # Validate numeric values
             try:

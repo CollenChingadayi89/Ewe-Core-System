@@ -259,6 +259,26 @@ export const del = <T = unknown>(url: string, config?: AxiosRequestConfig): Prom
   return apiClient.delete<T>(url, config);
 };
 
+/**
+ * Helper function for POST requests with FormData (file uploads)
+ * The multipart Content-Type must be set explicitly to override the client's JSON default;
+ * otherwise axios serialises the FormData to JSON and drops the files. Axios then removes
+ * it in the browser so the browser can add the multipart boundary.
+ */
+export const postFormData = <T = unknown>(
+  url: string,
+  formData: FormData,
+  config?: AxiosRequestConfig
+): Promise<AxiosResponse<T>> => {
+  return apiClient.post<T>(url, formData, {
+    ...config,
+    headers: {
+      ...config?.headers,
+      'Content-Type': 'multipart/form-data',
+    },
+  });
+};
+
 // Export apiClient as both named and default export
 export { apiClient };
 export default apiClient;

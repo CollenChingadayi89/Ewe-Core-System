@@ -30,10 +30,22 @@ import {
   EyeOutlined,
   CheckOutlined,
   CloseOutlined,
+  DollarOutlined,
+  CalendarOutlined,
+  WalletOutlined,
+  AccountBookOutlined,
+  FileTextOutlined,
+  DownloadOutlined,
+  FilePdfOutlined,
+  FileImageOutlined,
+  FileWordOutlined,
+  FileExcelOutlined,
+  PaperClipOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useAuthStore } from '../../store/authStore';
 import { useApprovalStore } from '../../store/approvalStore';
+import { ProcurementDetailsContent } from '../finance/ProcurementDetailsContent';
 import type { ApprovalRequest } from '../../types';
 
 const { Title, Text } = Typography;
@@ -62,8 +74,8 @@ export const ApprovalsPage = () => {
 
   // Filter approvals that need my attention (where I'm the current approver)
   const pendingApprovals = approvalRequests.filter((req) => {
-    const currentStep = req.approvalChain.find((step) => step.status === 'pending');
-    return currentStep?.approverId === user?.id && req.status === 'pending';
+    return req.currentApproverId === user?.id &&
+           (req.status === 'pending' || req.status === 'in_progress');
   });
 
   // Filter my own requests
@@ -149,38 +161,62 @@ export const ApprovalsPage = () => {
 
   const columns: ColumnsType<ApprovalRequest> = [
     {
-      title: 'Request ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 120,
-    },
-    {
       title: 'Type',
       dataIndex: 'type',
       key: 'type',
-      render: (type) => (
-        <Tag color="blue">{getTypeLabel(type)}</Tag>
-      ),
-    },
-    {
-      title: 'Requestor',
-      dataIndex: 'requestorId',
-      key: 'requestorId',
-      render: (requestorId) => {
-        // This would normally fetch user data
-        return <Text>EMP{requestorId.slice(-3)}</Text>;
+      width: '12%',
+      render: (type) => {
+        const getTypeIcon = () => {
+          switch(type) {
+            case 'leave': return <CalendarOutlined />;
+            case 'expense': return <DollarOutlined />;
+            case 'petty-cash': return <WalletOutlined />;
+            case 'payable':
+            case 'receivable': return <AccountBookOutlined />;
+            default: return <FileTextOutlined />;
+          }
+        };
+        return (
+          <Tag color="blue" icon={getTypeIcon()}>
+            {getTypeLabel(type)}
+          </Tag>
+        );
       },
     },
     {
+      title: 'Requestor',
+      dataIndex: 'requestorName',
+      key: 'requestorName',
+      width: '15%',
+      render: (requestorName) => (
+        <Text>{requestorName || 'Unknown'}</Text>
+      ),
+    },
+    {
       title: 'Submitted Date',
-      dataIndex: 'submittedAt',
-      key: 'submittedAt',
+      dataIndex: 'createdAt',
+      key: 'createdAt',
+      width: '12%',
       render: (date) => new Date(date).toLocaleDateString(),
+    },
+    {
+      title: 'Amount',
+      dataIndex: 'amount',
+      key: 'amount',
+      width: '12%',
+      render: (amount, record) => {
+        if (!amount || amount === 0) {
+          return <Text type="secondary">-</Text>;
+        }
+        const currency = (record as any).data?.currency || 'ZWG';
+        return <Text strong>{currency} {parseFloat(amount).toLocaleString()}</Text>;
+      },
     },
     {
       title: 'Status',
       dataIndex: 'status',
       key: 'status',
+      width: '12%',
       render: (status) => (
         <Tag color={getStatusColor(status)} icon={
           status === 'approved' ? <CheckCircleOutlined /> :
@@ -194,6 +230,7 @@ export const ApprovalsPage = () => {
     {
       title: 'Current Stage',
       key: 'currentStage',
+      width: '12%',
       render: (_, record) => {
         const currentStep = record.approvalChain.find((step) => step.status === 'pending');
         return currentStep ? `Level ${currentStep.level}` : 'Completed';
@@ -202,6 +239,7 @@ export const ApprovalsPage = () => {
     {
       title: 'Actions',
       key: 'actions',
+      width: '25%',
       render: (_, record) => (
         <Space>
           <Button
@@ -466,12 +504,27 @@ export const ApprovalsPage = () => {
             {/* Amount if applicable */}
             {(selectedRequest as any).amount && (
               <Card size="small" title="Amount" style={{ marginBottom: 16 }}>
-                <Statistic value={(selectedRequest as any).amount} prefix="ZWG" />
+                <Statistic
+                  value={(selectedRequest as any).amount}
+                  prefix={(selectedRequest as any).content_object_details?.currency || 'ZWG'}
+                />
+              </Card>
+            )}
+
+            {/* Procurement: full request details, including quotation documents */}
+            {(selectedRequest as any).content_object_details?.type === 'procurement' && (
+              <Card size="small" title="Procurement Details" style={{ marginBottom: 16 }}>
+                <ProcurementDetailsContent
+                  key={(selectedRequest as any).content_object_details.id}
+                  request={(selectedRequest as any).content_object_details}
+                  employeeNames={(selectedRequest as any).content_object_details.assigned_employee_names}
+                />
               </Card>
             )}
 
             {/* Content Object Details (Leave Request, Expense, etc.) */}
-            {(selectedRequest as any).content_object_details && (
+            {(selectedRequest as any).content_object_details &&
+              (selectedRequest as any).content_object_details.type !== 'procurement' && (
               <Card
                 size="small"
                 title={
@@ -485,8 +538,6 @@ export const ApprovalsPage = () => {
                     ? 'Payable Details'
                     : (selectedRequest as any).content_object_details.type === 'receivable'
                     ? 'Receivable Details'
-                    : (selectedRequest as any).content_object_details.type === 'procurement'
-                    ? 'Procurement Details'
                     : 'Request Details'
                 }
                 style={{ marginBottom: 16 }}
@@ -544,7 +595,7 @@ export const ApprovalsPage = () => {
                         {(selectedRequest as any).content_object_details.category}
                       </Descriptions.Item>
                       <Descriptions.Item label="Amount">
-                        ZWG {(selectedRequest as any).content_object_details.amount?.toLocaleString()}
+                        {(selectedRequest as any).content_object_details.currency || 'ZWG'} {(selectedRequest as any).content_object_details.amount?.toLocaleString()}
                       </Descriptions.Item>
                       <Descriptions.Item label="Date">
                         {(selectedRequest as any).content_object_details.date}
@@ -567,7 +618,7 @@ export const ApprovalsPage = () => {
                         <Text strong>{(selectedRequest as any).content_object_details.voucher_number}</Text>
                       </Descriptions.Item>
                       <Descriptions.Item label="Amount">
-                        ZWG {(selectedRequest as any).content_object_details.amount?.toLocaleString()}
+                        {(selectedRequest as any).content_object_details.currency || 'ZWG'} {(selectedRequest as any).content_object_details.amount?.toLocaleString()}
                       </Descriptions.Item>
                       <Descriptions.Item label="Date">
                         {(selectedRequest as any).content_object_details.date}
@@ -586,14 +637,26 @@ export const ApprovalsPage = () => {
                   {/* Payable Details */}
                   {(selectedRequest as any).content_object_details.type === 'payable' && (
                     <>
-                      <Descriptions.Item label="Invoice Number">
-                        <Text strong>{(selectedRequest as any).content_object_details.invoice_number}</Text>
+                      <Descriptions.Item label="Payable Number">
+                        <Text strong>{(selectedRequest as any).content_object_details.payable_number}</Text>
                       </Descriptions.Item>
-                      <Descriptions.Item label="Vendor">
-                        {(selectedRequest as any).content_object_details.vendor}
+                      <Descriptions.Item label="Payee">
+                        {(selectedRequest as any).content_object_details.payee_name}{' '}
+                        <Tag color={(selectedRequest as any).content_object_details.payee_type === 'member' ? 'green' : 'blue'}>
+                          {(selectedRequest as any).content_object_details.payee_type === 'member' ? 'Member' : 'Vendor'}
+                        </Tag>
+                        <Text type="secondary">{(selectedRequest as any).content_object_details.payee_reference}</Text>
                       </Descriptions.Item>
+                      <Descriptions.Item label="Category">
+                        {(selectedRequest as any).content_object_details.category_display}
+                      </Descriptions.Item>
+                      {(selectedRequest as any).content_object_details.invoice_number && (
+                        <Descriptions.Item label="Invoice Number">
+                          {(selectedRequest as any).content_object_details.invoice_number}
+                        </Descriptions.Item>
+                      )}
                       <Descriptions.Item label="Amount">
-                        ZWG {(selectedRequest as any).content_object_details.amount?.toLocaleString()}
+                        {(selectedRequest as any).content_object_details.currency || 'ZWG'} {(selectedRequest as any).content_object_details.amount?.toLocaleString()}
                       </Descriptions.Item>
                       <Descriptions.Item label="Due Date">
                         {(selectedRequest as any).content_object_details.due_date}
@@ -622,7 +685,7 @@ export const ApprovalsPage = () => {
                         {(selectedRequest as any).content_object_details.service_type}
                       </Descriptions.Item>
                       <Descriptions.Item label="Amount">
-                        ZWG {(selectedRequest as any).content_object_details.amount?.toLocaleString()}
+                        {(selectedRequest as any).content_object_details.currency || 'ZWG'} {(selectedRequest as any).content_object_details.amount?.toLocaleString()}
                       </Descriptions.Item>
                       <Descriptions.Item label="Due Date">
                         {(selectedRequest as any).content_object_details.due_date}
@@ -638,32 +701,117 @@ export const ApprovalsPage = () => {
                     </>
                   )}
 
-                  {/* Procurement Details */}
-                  {(selectedRequest as any).content_object_details.type === 'procurement' && (
-                    <>
-                      <Descriptions.Item label="Request Number">
-                        <Text strong>{(selectedRequest as any).content_object_details.request_number}</Text>
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Item">
-                        {(selectedRequest as any).content_object_details.item}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Quantity">
-                        {(selectedRequest as any).content_object_details.quantity}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Estimated Cost">
-                        ZWG {(selectedRequest as any).content_object_details.estimated_cost?.toLocaleString()}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Status">
-                        <Tag color={getStatusColor((selectedRequest as any).content_object_details.status)}>
-                          {(selectedRequest as any).content_object_details.status?.toUpperCase()}
-                        </Tag>
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Purpose" span={2}>
-                        {(selectedRequest as any).content_object_details.purpose}
-                      </Descriptions.Item>
-                    </>
-                  )}
                 </Descriptions>
+              </Card>
+            )}
+
+            {/* Supporting Documents (procurement documents are shown in its quotations table) */}
+            {(selectedRequest as any).content_object_details?.type !== 'procurement' &&
+              ((selectedRequest as any).content_object_details?.attachments ||
+              (selectedRequest as any).content_object_details?.supporting_documents ||
+              (selectedRequest as any).data?.attachments) && (
+              <Card
+                size="small"
+                title={<Space><PaperClipOutlined /> Supporting Documents</Space>}
+                style={{ marginBottom: 16 }}
+              >
+                {(() => {
+                  // Get attachments from various possible locations
+                  const attachments =
+                    (selectedRequest as any).content_object_details?.attachments ||
+                    (selectedRequest as any).content_object_details?.supporting_documents ||
+                    (selectedRequest as any).data?.attachments ||
+                    [];
+
+                  // Handle both array of URLs and array of objects
+                  const normalizedAttachments = Array.isArray(attachments)
+                    ? attachments.map((item: any) =>
+                        typeof item === 'string' ? item : item.url || item.file_url || item
+                      )
+                    : [];
+
+                  if (normalizedAttachments.length === 0) {
+                    return <Text type="secondary">No supporting documents attached</Text>;
+                  }
+
+                  // Function to get file icon based on extension
+                  const getFileIcon = (url: string) => {
+                    const extension = url.split('.').pop()?.toLowerCase();
+                    switch (extension) {
+                      case 'pdf':
+                        return <FilePdfOutlined style={{ fontSize: '24px', color: '#ff4d4f' }} />;
+                      case 'jpg':
+                      case 'jpeg':
+                      case 'png':
+                      case 'gif':
+                        return <FileImageOutlined style={{ fontSize: '24px', color: '#52c41a' }} />;
+                      case 'doc':
+                      case 'docx':
+                        return <FileWordOutlined style={{ fontSize: '24px', color: '#1890ff' }} />;
+                      case 'xls':
+                      case 'xlsx':
+                        return <FileExcelOutlined style={{ fontSize: '24px', color: '#52c41a' }} />;
+                      default:
+                        return <FileTextOutlined style={{ fontSize: '24px', color: '#8c8c8c' }} />;
+                    }
+                  };
+
+                  // Function to get filename from URL
+                  const getFilename = (url: string) => {
+                    const parts = url.split('/');
+                    return parts[parts.length - 1] || 'document';
+                  };
+
+                  return (
+                    <Space direction="vertical" style={{ width: '100%' }} size="small">
+                      {normalizedAttachments.map((url: string, index: number) => (
+                        <Card
+                          key={index}
+                          size="small"
+                          style={{ background: '#fafafa' }}
+                        >
+                          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                            <Space>
+                              {getFileIcon(url)}
+                              <div>
+                                <Text strong style={{ display: 'block' }}>
+                                  {getFilename(url)}
+                                </Text>
+                                <Text type="secondary" style={{ fontSize: '12px' }}>
+                                  Document {index + 1}
+                                </Text>
+                              </div>
+                            </Space>
+                            <Space>
+                              <Button
+                                type="primary"
+                                size="small"
+                                icon={<EyeOutlined />}
+                                onClick={() => window.open(url, '_blank')}
+                              >
+                                View
+                              </Button>
+                              <Button
+                                size="small"
+                                icon={<DownloadOutlined />}
+                                onClick={() => {
+                                  const link = document.createElement('a');
+                                  link.href = url;
+                                  link.download = getFilename(url);
+                                  document.body.appendChild(link);
+                                  link.click();
+                                  document.body.removeChild(link);
+                                }}
+                              >
+                                Download
+                              </Button>
+                            </Space>
+                          </Space>
+                        </Card>
+                      ))}
+                    </Space>
+                  );
+                })()}
               </Card>
             )}
 

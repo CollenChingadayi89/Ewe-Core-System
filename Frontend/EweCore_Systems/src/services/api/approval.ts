@@ -24,6 +24,9 @@ export interface ApprovalWorkflowResponse {
     approval_logic: 'any' | 'all';
     is_required: boolean;
     auto_approve_conditions: Record<string, any> | null;
+    /** verify | certify | recommend | approve | pay | review (defaults to approve) */
+    action_type?: string;
+    target_status?: string;
   }>;
   conditions: Record<string, any>;
   is_active: boolean;
@@ -94,6 +97,13 @@ export interface ApprovalRequestDetailResponse extends ApprovalRequestListRespon
     full_name: string;
   } | null;
   approval_steps: ApprovalStepResponse[];
+  content_object_details?: {
+    type?: string;
+    amount?: number;
+    currency?: string;
+    date?: string;
+    [key: string]: any;
+  };
 }
 
 export interface ApprovalRequestCreateRequest {

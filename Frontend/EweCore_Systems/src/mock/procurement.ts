@@ -8,6 +8,7 @@ export interface ProcurementRequest {
   quantity: number;
   unit: string;
   estimatedCost: number;
+  currency?: string;
   requestedDate: string;
   requiredByDate: string;
   vendor?: string;
@@ -419,13 +420,16 @@ export const procurementStats = {
     .reduce((sum, r) => sum + (r.actualCost || r.estimatedCost), 0),
 };
 
+// Categories matching backend model choices
 export const procurementCategories = [
-  'Office Supplies',
-  'IT Equipment',
-  'Furniture',
-  'Services',
-  'Utilities',
-  'Maintenance',
+  { label: 'Equipment', value: 'equipment' },
+  { label: 'Furniture', value: 'furniture' },
+  { label: 'Office Supplies', value: 'office_supplies' },
+  { label: 'IT Hardware', value: 'it_hardware' },
+  { label: 'Software', value: 'software' },
+  { label: 'Professional Services', value: 'services' },
+  { label: 'Maintenance', value: 'maintenance' },
+  { label: 'Other', value: 'other' },
 ];
 
 export const vendors = [

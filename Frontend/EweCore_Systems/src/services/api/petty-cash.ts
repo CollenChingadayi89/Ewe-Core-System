@@ -39,7 +39,19 @@ export interface PettyCashListResponse {
   updated_at: string;
 }
 
+export interface PettyCashLineItem {
+  description: string;
+  currency: string;
+  quantity: number;
+  unit_price: number;
+  amount: number;
+}
+
 export interface PettyCashDetailResponse extends PettyCashListResponse {
+  line_items: PettyCashLineItem[];
+  verified_by: string | null;
+  verified_by_name: string | null;
+  verified_date: string | null;
   rejection_reason: string | null;
   disbursed_by: string | null;
   disbursed_by_name: string | null;
@@ -49,6 +61,7 @@ export interface PettyCashDetailResponse extends PettyCashListResponse {
 }
 
 export interface PettyCashCreateRequest {
+  employee: string;
   amount: number;
   currency?: string;
   purpose: string;
@@ -60,6 +73,7 @@ export interface PettyCashCreateRequest {
   status?: string;
   priority?: string;
   notes?: string;
+  line_items?: PettyCashLineItem[];
 }
 
 export interface PettyCashFilters {

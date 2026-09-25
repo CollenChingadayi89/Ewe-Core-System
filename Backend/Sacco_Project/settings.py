@@ -32,7 +32,7 @@ CRYPTOGRAPHY_KEY = os.environ.get('CRYPTOGRAPHY_KEY', 'vZ8vF3mK9qN2rT5wX7yB1cE4h
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.227,localhost').split(',')
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.227,192.168.56.1,192.168.1.226,localhost').split(',')
 
 
 # Application definition
@@ -491,6 +491,7 @@ CORS_ALLOWED_ORIGINS = [
     'http://127.0.0.1:5174',
     'http://192.168.1.227:5173',
     'http://192.168.1.227:5174',
+    'http://192.168.1.226:5173',
 ]
 
 CORS_ALLOW_CREDENTIALS = True

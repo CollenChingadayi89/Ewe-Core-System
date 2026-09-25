@@ -4,9 +4,16 @@ Money going OUT from SACCO to vendors/suppliers.
 Supports approval workflows and payment tracking.
 """
 
-from rest_framework import serializers
 from decimal import Decimal
+
+from django.utils import timezone
+from rest_framework import serializers
+
+from approval.services import PAY_ACTION, get_stage_config
+from core.constants import PayableCategory, PayeeType
+
 from .models import Vendor, Payable
+from .services import OPEN_APPROVAL_STATUSES, current_action_type, get_approval_request
 
 
 # ============================================================================
@@ -199,126 +206,174 @@ class VendorCreateUpdateSerializer(serializers.ModelSerializer):
 # PAYABLE SERIALIZERS
 # ============================================================================
 
-class PayableListSerializer(serializers.ModelSerializer):
+BANK_TRANSFER = 'Bank Transfer'
+MOBILE_MONEY = 'Mobile Money'
+BANK_FIELDS = ['pay_to_bank_name', 'pay_to_bank_branch', 'pay_to_account_number', 'pay_to_account_name']
+PAY_TO_FIELDS = [*BANK_FIELDS, 'pay_to_mobile_number']
+# Payee details each payment method needs (branch is optional); other details are cleared
+PAY_TO_REQUIRED = {
+    BANK_TRANSFER: ['pay_to_bank_name', 'pay_to_account_number', 'pay_to_account_name'],
+    MOBILE_MONEY: ['pay_to_mobile_number'],
+}
+PAY_TO_ALLOWED = {
+    BANK_TRANSFER: BANK_FIELDS,
+    MOBILE_MONEY: ['pay_to_mobile_number'],
+}
+
+def approval_summary(payable, employee_id):
     """
-    Lightweight serializer for payable list views.
-    Includes vendor name and overdue status.
+    Where the payable is in its approval workflow, and whether the viewer can act now.
+    can_act mirrors the approval engine's check (current approver + open request).
     """
-    vendor_name = serializers.CharField(source='vendor.company_name', read_only=True)
-    vendor_code = serializers.CharField(source='vendor.vendor_code', read_only=True)
+    approval_request = get_approval_request(payable)
+    if approval_request is None:
+        return None
+    stages = approval_request.workflow.stages if approval_request.workflow else []
+    stage = get_stage_config(approval_request, approval_request.current_stage)
+    is_open = approval_request.status in OPEN_APPROVAL_STATUSES
+    return {
+        'id': str(approval_request.id),
+        'request_number': approval_request.request_number,
+        'status': approval_request.status,
+        'current_stage': approval_request.current_stage,
+        'total_stages': len(stages),
+        'current_stage_name': stage.get('stage_name') if stage and is_open else None,
+        'current_action_type': current_action_type(approval_request) if is_open else None,
+        'current_approver_name': (
+            approval_request.current_approver.get_full_name()
+            if is_open and approval_request.current_approver else None
+        ),
+        'can_act': bool(
+            is_open and employee_id and approval_request.current_approver_id == employee_id
+        ),
+    }
+
+
+class PayableReadMixin(serializers.Serializer):
+    """Payee, approval and payment fields shared by the list and detail serializers."""
+    payee_type_display = serializers.CharField(source='get_payee_type_display', read_only=True)
+    payee_name = serializers.CharField(read_only=True)
+    payee_reference = serializers.CharField(read_only=True)
     category_display = serializers.CharField(source='get_category_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    submitted_by_name = serializers.SerializerMethodField()
+    submitted_by_name = serializers.CharField(source='submitted_by.get_full_name', read_only=True)
+    approved_by_name = serializers.SerializerMethodField()
+    paid_by_name = serializers.SerializerMethodField()
     is_overdue = serializers.SerializerMethodField()
+    approval = serializers.SerializerMethodField()
+    can_mark_paid = serializers.SerializerMethodField()
 
-    class Meta:
-        model = Payable
-        fields = [
-            'id',
-            'payable_number',
-            'vendor',
-            'vendor_name',
-            'vendor_code',
-            'invoice_number',
-            'category',
-            'category_display',
-            'amount',
-            'tax_amount',
-            'total_amount',
-            'currency',
-            'invoice_date',
-            'due_date',
-            'collection_date',
-            'status',
-            'status_display',
-            'priority',
-            'is_overdue',
-            'submitted_by',
-            'submitted_by_name',
-            'created_at',
-            'updated_at',
-        ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'total_amount']
+    def get_approved_by_name(self, obj):
+        return obj.approved_by.get_full_name() if obj.approved_by else None
 
-    def get_submitted_by_name(self, obj):
-        """Get name of submitter"""
-        return obj.submitted_by.get_full_name()
+    def get_paid_by_name(self, obj):
+        return obj.paid_by.get_full_name() if obj.paid_by else None
 
     def get_is_overdue(self, obj):
-        """Check if payable is overdue"""
         return obj.is_overdue()
 
+    def _approval(self, obj):
+        # Computed once per object; approval and can_mark_paid both need it
+        cache = self.context.setdefault('_approval_cache', {})
+        if obj.pk not in cache:
+            cache[obj.pk] = approval_summary(obj, self.context.get('employee_id'))
+        return cache[obj.pk]
 
-class PayableDetailSerializer(serializers.ModelSerializer):
-    """
-    Detailed serializer for payable detail views.
-    Includes nested vendor info and approval chain.
-    """
-    vendor_details = serializers.SerializerMethodField()
-    category_display = serializers.CharField(source='get_category_display', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
-    submitted_by_details = serializers.SerializerMethodField()
-    current_approver_details = serializers.SerializerMethodField()
-    is_overdue = serializers.SerializerMethodField()
+    def get_approval(self, obj):
+        return self._approval(obj)
+
+    def get_can_mark_paid(self, obj):
+        approval = self._approval(obj)
+        return bool(
+            obj.status == 'approved' and approval
+            and approval['can_act'] and approval['current_action_type'] == PAY_ACTION
+        )
+
+
+READ_FIELDS = [
+    'payee_type', 'payee_type_display', 'payee_name', 'payee_reference',
+    'category_display', 'status_display', 'submitted_by_name',
+    'approved_by_name', 'paid_by_name', 'is_overdue', 'approval', 'can_mark_paid',
+]
+
+
+class PayableListSerializer(PayableReadMixin, serializers.ModelSerializer):
+    """Serializer for payable list views."""
 
     class Meta:
         model = Payable
         fields = [
-            # Basic Info
             'id',
             'payable_number',
             'vendor',
-            'vendor_details',
-
-            # Invoice Details
+            'member',
             'invoice_number',
             'description',
             'category',
-            'category_display',
-
-            # Amount Details
             'amount',
-            'currency',
             'tax_amount',
             'total_amount',
-
-            # Dates
+            'currency',
             'invoice_date',
             'due_date',
             'collection_date',
             'paid_date',
-
-            # Payment Details
             'payment_method',
-            'payment_reference',
-
-            # Status & Approval
+            *PAY_TO_FIELDS,
             'status',
-            'status_display',
             'priority',
             'submitted_by',
-            'submitted_by_details',
-            'current_approver',
-            'current_approver_details',
-            'approval_chain',
-            'approved_date',
-            'rejection_reason',
-
-            # Additional Info
-            'attachments',
-            'notes',
-            'is_overdue',
-
-            # Timestamps
             'created_at',
             'updated_at',
-            'created_by',
-            'modified_by',
+            *READ_FIELDS,
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'total_amount']
+        read_only_fields = fields
+
+
+class PayableDetailSerializer(PayableReadMixin, serializers.ModelSerializer):
+    """Serializer for payable detail views, with payee contact details."""
+    vendor_details = serializers.SerializerMethodField()
+    member_details = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Payable
+        fields = [
+            'id',
+            'payable_number',
+            'vendor',
+            'vendor_details',
+            'member',
+            'member_details',
+            'invoice_number',
+            'description',
+            'category',
+            'amount',
+            'currency',
+            'tax_amount',
+            'total_amount',
+            'invoice_date',
+            'due_date',
+            'collection_date',
+            'paid_date',
+            'payment_method',
+            'payment_reference',
+            *PAY_TO_FIELDS,
+            'status',
+            'priority',
+            'submitted_by',
+            'approved_date',
+            'rejection_reason',
+            'attachments',
+            'notes',
+            'created_at',
+            'updated_at',
+            *READ_FIELDS,
+        ]
+        read_only_fields = fields
 
     def get_vendor_details(self, obj):
-        """Get vendor information"""
+        if not obj.vendor:
+            return None
         return {
             'id': str(obj.vendor.id),
             'vendor_code': obj.vendor.vendor_code,
@@ -326,48 +381,36 @@ class PayableDetailSerializer(serializers.ModelSerializer):
             'contact_person': obj.vendor.contact_person,
             'phone': obj.vendor.phone,
             'email': obj.vendor.email,
-            'vendor_type': obj.vendor.vendor_type,
             'vendor_type_display': obj.vendor.get_vendor_type_display(),
             'payment_terms': obj.vendor.payment_terms,
         }
 
-    def get_submitted_by_details(self, obj):
-        """Get submitter information"""
+    def get_member_details(self, obj):
+        if not obj.member:
+            return None
         return {
-            'id': str(obj.submitted_by.id),
-            'employee_number': obj.submitted_by.employee_number,
-            'first_name': obj.submitted_by.first_name,
-            'last_name': obj.submitted_by.last_name,
-            'full_name': obj.submitted_by.get_full_name(),
+            'id': str(obj.member.id),
+            'member_number': obj.member.member_number,
+            'full_name': obj.member.get_full_name(),
+            'phone': obj.member.phone,
+            'email': obj.member.email,
+            'account_status': obj.member.account_status,
         }
-
-    def get_current_approver_details(self, obj):
-        """Get current approver information"""
-        if obj.current_approver:
-            return {
-                'id': str(obj.current_approver.id),
-                'employee_number': obj.current_approver.employee_number,
-                'first_name': obj.current_approver.first_name,
-                'last_name': obj.current_approver.last_name,
-                'full_name': obj.current_approver.get_full_name(),
-            }
-        return None
-
-    def get_is_overdue(self, obj):
-        """Check if payable is overdue"""
-        return obj.is_overdue()
 
 
 class PayableCreateUpdateSerializer(serializers.ModelSerializer):
     """
-    Serializer for creating and updating payables.
-    Validates amounts and date ranges.
+    Creating and editing payables. submitted_by, status and approval fields are set
+    server-side; the payee must match payee_type and the category must suit the payee.
     """
+    invoice_date = serializers.DateField(required=False)
 
     class Meta:
         model = Payable
         fields = [
+            'payee_type',
             'vendor',
+            'member',
             'invoice_number',
             'description',
             'category',
@@ -378,49 +421,99 @@ class PayableCreateUpdateSerializer(serializers.ModelSerializer):
             'due_date',
             'collection_date',
             'payment_method',
-            'payment_reference',
             'priority',
-            'attachments',
             'notes',
-            'submitted_by',
+            *PAY_TO_FIELDS,
         ]
 
+    def _value(self, attrs, field, default=None):
+        """Incoming value, falling back to the instance being updated (supports PATCH)."""
+        if field in attrs:
+            return attrs[field]
+        return getattr(self.instance, field, default) if self.instance else default
+
     def validate(self, attrs):
-        """Comprehensive validation for payables"""
-        amount = attrs.get('amount')
-        tax_amount = attrs.get('tax_amount', Decimal('0'))
+        payee_type = self._value(attrs, 'payee_type', PayeeType.VENDOR)
+        vendor = self._value(attrs, 'vendor')
+        member = self._value(attrs, 'member')
+        errors = {}
 
-        # Validate amounts are positive
-        if amount and amount <= 0:
-            raise serializers.ValidationError({
-                'amount': 'Amount must be greater than zero.'
-            })
+        if payee_type == PayeeType.VENDOR:
+            if vendor is None:
+                errors['vendor'] = 'Select the vendor to pay.'
+            elif not vendor.is_active:
+                errors['vendor'] = 'Cannot create a payable for an inactive vendor.'
+            if member is not None:
+                errors['member'] = 'A vendor payable cannot also have a member payee.'
+            if not self._value(attrs, 'invoice_date'):
+                errors['invoice_date'] = 'Invoice date is required for vendor payables.'
+        else:
+            if member is None:
+                errors['member'] = 'Select the member to pay.'
+            elif member.is_deleted:
+                errors['member'] = 'This member record has been deleted.'
+            if vendor is not None:
+                errors['vendor'] = 'A member payable cannot also have a vendor payee.'
+            if not self._value(attrs, 'invoice_date'):
+                # Member payouts have no invoice; the request date stands in for it
+                attrs['invoice_date'] = timezone.localdate()
 
-        if tax_amount and tax_amount < 0:
-            raise serializers.ValidationError({
-                'tax_amount': 'Tax amount cannot be negative.'
-            })
+        category = self._value(attrs, 'category', PayableCategory.OTHER)
+        if category not in PayableCategory.allowed_for(payee_type):
+            errors['category'] = 'This category does not apply to the selected payee type.'
 
-        # Validate dates
-        invoice_date = attrs.get('invoice_date')
-        due_date = attrs.get('due_date')
+        amount = self._value(attrs, 'amount')
+        if amount is not None and amount <= 0:
+            errors['amount'] = 'Amount must be greater than zero.'
+        tax_amount = self._value(attrs, 'tax_amount', Decimal('0'))
+        if tax_amount is not None and tax_amount < 0:
+            errors['tax_amount'] = 'Tax amount cannot be negative.'
 
+        invoice_date = self._value(attrs, 'invoice_date')
+        due_date = self._value(attrs, 'due_date')
+        collection_date = self._value(attrs, 'collection_date')
         if invoice_date and due_date and invoice_date > due_date:
-            raise serializers.ValidationError({
-                'due_date': 'Due date must be on or after invoice date.'
-            })
+            errors['due_date'] = 'Due date must be on or after invoice date.'
+        if invoice_date and collection_date and collection_date < invoice_date:
+            errors['collection_date'] = 'Collection date cannot be before invoice date.'
 
-        collection_date = attrs.get('collection_date')
-        if collection_date and invoice_date and collection_date < invoice_date:
-            raise serializers.ValidationError({
-                'collection_date': 'Collection date cannot be before invoice date.'
-            })
+        errors.update(self._validate_pay_to(attrs))
 
-        # Validate vendor is active
-        vendor = attrs.get('vendor')
-        if vendor and not vendor.is_active:
-            raise serializers.ValidationError({
-                'vendor': 'Cannot create payable for inactive vendor.'
-            })
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
 
+    def _validate_pay_to(self, attrs) -> dict:
+        """
+        Require the payee details the chosen payment method needs, and clear details that
+        don't apply, so approvers only see where the money will actually go.
+        """
+        method = self._value(attrs, 'payment_method')
+        required = PAY_TO_REQUIRED.get(method, [])
+        errors = {
+            field: f'Required for {method} payments.'
+            for field in required
+            if not (self._value(attrs, field) or '').strip()
+        }
+        if not errors:
+            for field in PAY_TO_FIELDS:
+                if field not in PAY_TO_ALLOWED.get(method, []):
+                    attrs[field] = None
+        return errors
+
+
+class MarkPaidSerializer(serializers.Serializer):
+    """Payment details recorded by the Pay-stage assignee."""
+    paid_date = serializers.DateField(required=False)
+    payment_method = serializers.CharField(max_length=50)
+    payment_reference = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_paid_date(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError('Paid date cannot be in the future.')
+        return value
+
+    def validate(self, attrs):
+        attrs.setdefault('paid_date', timezone.localdate())
         return attrs

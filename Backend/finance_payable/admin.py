@@ -11,6 +11,7 @@ class VendorAdmin(admin.ModelAdmin):
 
 @admin.register(Payable)
 class PayableAdmin(admin.ModelAdmin):
-    list_display = ['payable_number', 'vendor', 'total_amount', 'due_date', 'status']
-    list_filter = ['status', 'category', 'due_date']
-    search_fields = ['payable_number', 'invoice_number', 'description']
+    list_display = ['payable_number', 'payee_type', 'vendor', 'member', 'currency', 'total_amount', 'due_date', 'status']
+    list_filter = ['status', 'payee_type', 'category', 'currency', 'due_date']
+    search_fields = ['payable_number', 'invoice_number', 'description', 'member__member_number']
+    raw_id_fields = ['vendor', 'member', 'submitted_by', 'approved_by', 'paid_by']

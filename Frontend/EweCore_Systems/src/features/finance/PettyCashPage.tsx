@@ -14,12 +14,18 @@ import {
   InboxOutlined,
   DeleteOutlined,
   MinusCircleOutlined,
+  FileTextOutlined,
+  CalendarOutlined,
+  UserOutlined,
+  DollarOutlined,
+  PrinterOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { PageHeader, FilterBar, DataTable, StatusTag, StatCard } from '../../components/common';
 import type { Filter } from '../../components/common';
 import { useAuthStore } from '../../store/authStore';
 import { usePettyCashStore } from '../../store/pettyCashStore';
+import { generatePettyCashPDF } from '../../utils/pdfGenerator';
 import dayjs from 'dayjs';
 
 const { TextArea } = Input;
@@ -48,19 +54,22 @@ export const PettyCashPage = () => {
   const [currencyFilter, setCurrencyFilter] = useState<string>('all');
   const [requestModalVisible, setRequestModalVisible] = useState(false);
   const [detailsDrawerVisible, setDetailsDrawerVisible] = useState(false);
-  const [selectedRequest, setSelectedRequest] = useState<PettyCashRequest | null>(null);
   const [form] = Form.useForm();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [selectedCurrency, setSelectedCurrency] = useState<string>('ZWG');
 
-  // Zustand store
+  // Zustand stores
+  const { user } = useAuthStore();
   const {
     pettyCashRequests,
+    selectedRequest,
     loading,
     error,
     fetchRequests,
+    fetchRequestById,
     createRequest,
     deleteRequest,
+    clearSelectedRequest,
   } = usePettyCashStore();
 
   // Fetch petty cash requests on mount
@@ -137,10 +146,32 @@ export const PettyCashPage = () => {
   // Handle request submission
   const handleSubmitRequest = async (values: any) => {
     try {
+      // Check if user is logged in
+      if (!user || !user.id) {
+        message.error('User not logged in. Please log in again.');
+        return;
+      }
+
       // Extract files from fileList
       const files = fileList.map(file => file.originFileObj as File).filter(Boolean);
 
+      // Ensure line items have all required fields with proper values
+      const lineItems = (values.line_items || []).map((item: any) => {
+        const quantity = parseFloat(item.quantity) || 0;
+        const unit_price = parseFloat(item.unit_price) || 0;
+        const amount = quantity * unit_price; // Calculate amount from quantity × unit_price
+
+        return {
+          description: item.description || '',
+          currency: item.currency || selectedCurrency,
+          quantity: quantity,
+          unit_price: unit_price,
+          amount: amount,
+        };
+      });
+
       const result = await createRequest({
+        employee: user.id, // Add employee ID from logged-in user
         category: values.category,
         purpose: values.purpose,
         amount: values.amount,
@@ -151,7 +182,7 @@ export const PettyCashPage = () => {
         priority: values.priority || 'medium',
         status: 'pending',
         notes: values.notes,
-        line_items: values.line_items || [],
+        line_items: lineItems,
       }, files);
 
       if (result) {
@@ -166,21 +197,49 @@ export const PettyCashPage = () => {
   };
 
   // Handle view details
-  const handleViewDetails = (request: PettyCashRequest) => {
-    setSelectedRequest(request);
-    setDetailsDrawerVisible(true);
+  const handleViewDetails = async (request: any) => {
+    try {
+      await fetchRequestById(request.id);
+      setDetailsDrawerVisible(true);
+    } catch (error) {
+      console.error('Failed to fetch request details:', error);
+      message.error('Failed to load request details');
+    }
+  };
+
+  // Handle drawer close
+  const handleCloseDetails = () => {
+    setDetailsDrawerVisible(false);
+    clearSelectedRequest();
+  };
+
+  // Handle PDF print
+  const handlePrintPDF = async () => {
+    if (!selectedRequest) {
+      message.error('No request selected');
+      return;
+    }
+
+    try {
+      message.loading({ content: 'Generating PDF...', key: 'pdf-gen' });
+      await generatePettyCashPDF(selectedRequest);
+      message.success({ content: 'PDF generated successfully', key: 'pdf-gen', duration: 2 });
+    } catch (error) {
+      console.error('Failed to generate PDF:', error);
+      message.error({ content: 'Failed to generate PDF', key: 'pdf-gen', duration: 2 });
+    }
   };
 
   // Handle approval
   const handleApprove = () => {
     message.success('Request approved successfully');
-    setDetailsDrawerVisible(false);
+    handleCloseDetails();
   };
 
   // Handle rejection
   const handleReject = () => {
     message.success('Request rejected');
-    setDetailsDrawerVisible(false);
+    handleCloseDetails();
   };
 
   // Filters configuration
@@ -419,7 +478,6 @@ export const PettyCashPage = () => {
         onOk={form.submit}
         width={1200}
         style={{ top: 20 }}
-        bodyStyle={{ maxHeight: 'calc(100vh - 200px)', overflowY: 'auto' }}
         okText="Submit Request"
         okButtonProps={{
           style: {
@@ -434,9 +492,9 @@ export const PettyCashPage = () => {
           onFinish={handleSubmitRequest}
           initialValues={{ currency: 'ZWG', receiptExpected: true, priority: 'medium' }}
         >
-          {/* Basic Information - 3 Column Layout */}
+          {/* Basic Information - 4 Column Layout */}
           <Row gutter={16}>
-            <Col span={8}>
+            <Col span={6}>
               <Form.Item
                 label="Currency"
                 name="currency"
@@ -451,7 +509,28 @@ export const PettyCashPage = () => {
                 </Select>
               </Form.Item>
             </Col>
-            <Col span={8}>
+            <Col span={6}>
+              <Form.Item
+                label="Amount"
+                name="amount"
+                rules={[
+                  { required: true, message: 'Please enter amount' },
+                  { type: 'number', min: 0.01, message: 'Amount must be greater than 0' }
+                ]}
+                tooltip="Will auto-calculate if you add line items below"
+              >
+                <InputNumber
+                  key={selectedCurrency}
+                  style={{ width: '100%' }}
+                  min={0}
+                  step={100}
+                  placeholder="Enter amount"
+                  formatter={(value) => `${selectedCurrency} ${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                  parser={(value) => value!.replace(/[A-Z]+\s?|(,*)/g, '') as any}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={6}>
               <Form.Item
                 label="Category"
                 name="category"
@@ -467,7 +546,7 @@ export const PettyCashPage = () => {
                 </Select>
               </Form.Item>
             </Col>
-            <Col span={8}>
+            <Col span={6}>
               <Form.Item
                 label="Priority"
                 name="priority"
@@ -482,37 +561,13 @@ export const PettyCashPage = () => {
             </Col>
           </Row>
 
-          <Row gutter={16}>
-            <Col span={16}>
-              <Form.Item
-                label="Purpose"
-                name="purpose"
-                rules={[{ required: true, message: 'Please enter purpose' }]}
-              >
-                <Input placeholder="Brief purpose of request" />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item
-                label="Amount"
-                name="amount"
-                rules={[
-                  { required: true, message: 'Please enter amount' },
-                  { type: 'number', min: 0.01, message: 'Amount must be greater than 0' }
-                ]}
-                tooltip="Will auto-calculate if you add line items below"
-              >
-                <InputNumber
-                  style={{ width: '100%' }}
-                  min={0}
-                  step={100}
-                  placeholder="Enter amount"
-                  formatter={(value) => `${selectedCurrency} ${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                  parser={(value) => value!.replace(/[A-Z]+\s?|(,*)/g, '') as any}
-                />
-              </Form.Item>
-            </Col>
-          </Row>
+          <Form.Item
+            label="Purpose"
+            name="purpose"
+            rules={[{ required: true, message: 'Please enter purpose' }]}
+          >
+            <Input placeholder="Brief purpose of request" />
+          </Form.Item>
 
           {/* Line Items Section */}
           <Card
@@ -538,7 +593,7 @@ export const PettyCashPage = () => {
                         {
                           title: 'Description',
                           key: 'description',
-                          width: '35%',
+                          width: '30%',
                           render: (_, field) => (
                             <Form.Item
                               {...field}
@@ -551,9 +606,27 @@ export const PettyCashPage = () => {
                           ),
                         },
                         {
+                          title: 'Currency',
+                          key: 'currency',
+                          width: '10%',
+                          render: (_, field) => (
+                            <Form.Item
+                              {...field}
+                              name={[field.name, 'currency']}
+                              rules={[{ required: true, message: 'Required' }]}
+                              style={{ marginBottom: 0 }}
+                            >
+                              <Select placeholder="Currency" style={{ width: '100%' }}>
+                                <Select.Option value="ZWG">ZWG</Select.Option>
+                                <Select.Option value="USD">USD</Select.Option>
+                              </Select>
+                            </Form.Item>
+                          ),
+                        },
+                        {
                           title: 'Quantity',
                           key: 'quantity',
-                          width: '15%',
+                          width: '12%',
                           render: (_, field) => (
                             <Form.Item
                               {...field}
@@ -569,6 +642,21 @@ export const PettyCashPage = () => {
                                 step={1}
                                 placeholder="Qty"
                                 style={{ width: '100%' }}
+                                onChange={(value) => {
+                                  const unitPrice = form.getFieldValue(['line_items', field.name, 'unit_price']) || 0;
+                                  const calculatedAmount = (value || 0) * unitPrice;
+                                  form.setFieldValue(['line_items', field.name, 'amount'], calculatedAmount);
+
+                                  // Update grand total
+                                  const lineItems = form.getFieldValue('line_items') || [];
+                                  const grandTotal = lineItems.reduce((sum: number, item: any, idx: number) => {
+                                    if (idx === field.name) {
+                                      return sum + calculatedAmount;
+                                    }
+                                    return sum + (parseFloat(item?.amount || 0));
+                                  }, 0);
+                                  form.setFieldValue('amount', grandTotal);
+                                }}
                               />
                             </Form.Item>
                           ),
@@ -576,7 +664,7 @@ export const PettyCashPage = () => {
                         {
                           title: 'Unit Price',
                           key: 'unit_price',
-                          width: '20%',
+                          width: '18%',
                           render: (_, field) => (
                             <Form.Item
                               {...field}
@@ -594,6 +682,21 @@ export const PettyCashPage = () => {
                                 style={{ width: '100%' }}
                                 formatter={(value) => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
                                 parser={(value) => value!.replace(/,/g, '') as any}
+                                onChange={(value) => {
+                                  const quantity = form.getFieldValue(['line_items', field.name, 'quantity']) || 0;
+                                  const calculatedAmount = quantity * (value || 0);
+                                  form.setFieldValue(['line_items', field.name, 'amount'], calculatedAmount);
+
+                                  // Update grand total
+                                  const lineItems = form.getFieldValue('line_items') || [];
+                                  const grandTotal = lineItems.reduce((sum: number, item: any, idx: number) => {
+                                    if (idx === field.name) {
+                                      return sum + calculatedAmount;
+                                    }
+                                    return sum + (parseFloat(item?.amount || 0));
+                                  }, 0);
+                                  form.setFieldValue('amount', grandTotal);
+                                }}
                               />
                             </Form.Item>
                           ),
@@ -601,20 +704,23 @@ export const PettyCashPage = () => {
                         {
                           title: 'Total',
                           key: 'amount',
-                          width: '20%',
+                          width: '18%',
                           render: (_, field) => (
-                            <Form.Item noStyle shouldUpdate>
+                            <Form.Item noStyle shouldUpdate={(prev, curr) => {
+                              const prevQty = prev.line_items?.[field.name]?.quantity;
+                              const currQty = curr.line_items?.[field.name]?.quantity;
+                              const prevPrice = prev.line_items?.[field.name]?.unit_price;
+                              const currPrice = curr.line_items?.[field.name]?.unit_price;
+                              const prevCurrency = prev.line_items?.[field.name]?.currency;
+                              const currCurrency = curr.line_items?.[field.name]?.currency;
+                              return prevQty !== currQty || prevPrice !== currPrice || prevCurrency !== currCurrency;
+                            }}>
                               {({ getFieldValue }) => {
-                                const quantity = getFieldValue(['line_items', field.name, 'quantity']) || 0;
-                                const unitPrice = getFieldValue(['line_items', field.name, 'unit_price']) || 0;
-                                const calculatedAmount = quantity * unitPrice;
-
-                                // Auto-set the amount field
-                                form.setFieldValue(['line_items', field.name, 'amount'], calculatedAmount);
-
+                                const amount = getFieldValue(['line_items', field.name, 'amount']) || 0;
+                                const currency = getFieldValue(['line_items', field.name, 'currency']) || 'ZWG';
                                 return (
                                   <Text strong style={{ fontSize: 14 }}>
-                                    {selectedCurrency} {calculatedAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    {currency} {parseFloat(amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                   </Text>
                                 );
                               }}
@@ -630,7 +736,17 @@ export const PettyCashPage = () => {
                               type="text"
                               danger
                               icon={<MinusCircleOutlined />}
-                              onClick={() => remove(field.name)}
+                              onClick={() => {
+                                remove(field.name);
+                                // Recalculate grand total after removal
+                                setTimeout(() => {
+                                  const lineItems = form.getFieldValue('line_items') || [];
+                                  const grandTotal = lineItems.reduce((sum: number, item: any) => {
+                                    return sum + (parseFloat(item?.amount || 0));
+                                  }, 0);
+                                  form.setFieldValue('amount', grandTotal);
+                                }, 0);
+                              }}
                               size="small"
                             />
                           ),
@@ -641,7 +757,7 @@ export const PettyCashPage = () => {
 
                   <Button
                     type="dashed"
-                    onClick={() => add({ description: '', quantity: 1, unit_price: 0, amount: 0 })}
+                    onClick={() => add({ description: '', currency: selectedCurrency, quantity: 1, unit_price: 0, amount: 0 })}
                     block
                     icon={<PlusOutlined />}
                     style={{ marginTop: fields.length > 0 ? 8 : 0 }}
@@ -651,17 +767,9 @@ export const PettyCashPage = () => {
 
                   {/* Grand Total Display */}
                   {fields.length > 0 && (
-                    <Form.Item noStyle shouldUpdate>
+                    <Form.Item noStyle shouldUpdate={(prev, curr) => prev.amount !== curr.amount}>
                       {({ getFieldValue }) => {
-                        const lineItems = getFieldValue('line_items') || [];
-                        const grandTotal = lineItems.reduce((sum: number, item: any) => {
-                          const qty = parseFloat(item?.quantity || 0);
-                          const price = parseFloat(item?.unit_price || 0);
-                          return sum + (qty * price);
-                        }, 0);
-
-                        // Auto-update the main amount field
-                        form.setFieldValue('amount', grandTotal);
+                        const grandTotal = getFieldValue('amount') || 0;
 
                         return (
                           <div style={{
@@ -675,7 +783,7 @@ export const PettyCashPage = () => {
                           }}>
                             <Text strong style={{ fontSize: 16 }}>Grand Total:</Text>
                             <Text strong style={{ fontSize: 18, color: '#00d084' }}>
-                              {selectedCurrency} {grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {selectedCurrency} {parseFloat(grandTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </Text>
                           </div>
                         );
@@ -801,87 +909,429 @@ export const PettyCashPage = () => {
 
       {/* Details Drawer */}
       <Drawer
-        title="Petty Cash Request Details"
+        title={
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', paddingRight: 40 }}>
+            <Space>
+              <FileTextOutlined />
+              <span>Petty Cash Request Details</span>
+            </Space>
+            <Button
+              type="primary"
+              icon={<PrinterOutlined />}
+              onClick={handlePrintPDF}
+              size="middle"
+            >
+              Print PDF
+            </Button>
+          </div>
+        }
         placement="right"
-        width={650}
-        onClose={() => setDetailsDrawerVisible(false)}
+        width={750}
+        onClose={handleCloseDetails}
         open={detailsDrawerVisible}
       >
         {selectedRequest && (
-          <div>
-            <Descriptions column={1} bordered size="small">
-              <Descriptions.Item label="Request ID">
-                <Text strong style={{ color: '#0693e3' }}>{selectedRequest.id}</Text>
-              </Descriptions.Item>
-              <Descriptions.Item label="Requested By">{selectedRequest.requestedBy}</Descriptions.Item>
-              <Descriptions.Item label="Department">{selectedRequest.department}</Descriptions.Item>
-              <Descriptions.Item label="Request Date">{selectedRequest.requestDate}</Descriptions.Item>
-              <Descriptions.Item label="Status">
-                <StatusTag status={selectedRequest.status} />
-              </Descriptions.Item>
-            </Descriptions>
+          <div style={{ marginBottom: 80 }}>
+            {/* Header Card */}
+            <Card style={{ marginBottom: 16, background: '#f0f7ff' }}>
+              <Row justify="space-between" align="middle">
+                <Col>
+                  <Space direction="vertical" size={0}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Request Number</Text>
+                    <Text strong style={{ fontSize: 18, color: '#0693e3' }}>
+                      {selectedRequest.petty_cash_number}
+                    </Text>
+                  </Space>
+                </Col>
+                <Col>
+                  <StatusTag status={selectedRequest.status} />
+                </Col>
+              </Row>
+            </Card>
 
-            <div style={{ marginTop: '20px' }}>
-              <Text strong style={{ fontSize: '14px' }}>Financial Details</Text>
-              <Descriptions column={1} bordered size="small" style={{ marginTop: '12px' }}>
-                <Descriptions.Item label="Amount">
-                  <Text strong style={{ color: '#00d084', fontSize: '16px' }}>
-                    {selectedRequest.currency} {selectedRequest.amount.toLocaleString()}
-                  </Text>
+            {/* Requester Information */}
+            <Card
+              title={
+                <Space>
+                  <UserOutlined />
+                  <span>Requester Information</span>
+                </Space>
+              }
+              size="small"
+              style={{ marginBottom: 16 }}
+            >
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="Employee Name">
+                  {selectedRequest.employee_name}
                 </Descriptions.Item>
-                <Descriptions.Item label="Currency">{selectedRequest.currency}</Descriptions.Item>
-                {selectedRequest.accountCode && (
-                  <Descriptions.Item label="Account/GL Code">{selectedRequest.accountCode}</Descriptions.Item>
-                )}
-                <Descriptions.Item label="Receipt Expected">
-                  {selectedRequest.receiptExpected ? 'Yes' : 'No'}
+                <Descriptions.Item label="Employee Number">
+                  {selectedRequest.employee_number}
+                </Descriptions.Item>
+                <Descriptions.Item label="Department">
+                  {selectedRequest.employee_department}
+                </Descriptions.Item>
+                <Descriptions.Item label="Request Date">
+                  <Space>
+                    <CalendarOutlined />
+                    {dayjs(selectedRequest.request_date).format('DD/MM/YYYY')}
+                  </Space>
                 </Descriptions.Item>
               </Descriptions>
-            </div>
+            </Card>
 
-            <div style={{ marginTop: '20px' }}>
-              <Text strong style={{ fontSize: '14px' }}>Request Details</Text>
-              <Descriptions column={1} bordered size="small" style={{ marginTop: '12px' }}>
-                <Descriptions.Item label="Purpose">{selectedRequest.purpose}</Descriptions.Item>
-                {selectedRequest.justification && (
-                  <Descriptions.Item label="Justification">
-                    <Text style={{ whiteSpace: 'pre-wrap' }}>{selectedRequest.justification}</Text>
+            {/* Financial Summary */}
+            <Card
+              title={
+                <Space>
+                  <DollarOutlined />
+                  <span>Financial Summary</span>
+                </Space>
+              }
+              size="small"
+              style={{ marginBottom: 16 }}
+            >
+              <Row gutter={16} style={{ marginBottom: 16 }}>
+                <Col span={12}>
+                  <div style={{ padding: 16, background: '#f6ffed', borderRadius: 8, border: '1px solid #b7eb8f' }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Total Amount</Text>
+                    <div>
+                      <Text strong style={{ fontSize: 24, color: '#52c41a' }}>
+                        {selectedRequest.currency_display} {selectedRequest.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </Text>
+                    </div>
+                  </div>
+                </Col>
+                <Col span={12}>
+                  <div style={{ padding: 16, background: '#f0f2f5', borderRadius: 8 }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Category</Text>
+                    <div>
+                      <Text strong style={{ fontSize: 16 }}>
+                        {selectedRequest.category_display}
+                      </Text>
+                    </div>
+                  </div>
+                </Col>
+              </Row>
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="Currency">
+                  {selectedRequest.currency_display}
+                </Descriptions.Item>
+                <Descriptions.Item label="Priority">
+                  {selectedRequest.priority_display}
+                </Descriptions.Item>
+                {selectedRequest.account_code && (
+                  <Descriptions.Item label="Account/GL Code">
+                    {selectedRequest.account_code}
+                  </Descriptions.Item>
+                )}
+                <Descriptions.Item label="Receipt Expected">
+                  {selectedRequest.receipt_expected ? '✅ Yes' : '❌ No'}
+                </Descriptions.Item>
+                {selectedRequest.required_by_date && (
+                  <Descriptions.Item label="Required By">
+                    {dayjs(selectedRequest.required_by_date).format('DD/MM/YYYY')}
                   </Descriptions.Item>
                 )}
               </Descriptions>
-            </div>
+            </Card>
 
-            <div style={{ marginTop: '24px' }}>
-              <Text strong>Request Timeline</Text>
-              <Timeline style={{ marginTop: '16px' }}>
-                <Timeline.Item color="green">
-                  Request submitted - {selectedRequest.requestDate}
+            {/* Purpose and Justification */}
+            <Card
+              title={
+                <Space>
+                  <FileTextOutlined />
+                  <span>Purpose & Justification</span>
+                </Space>
+              }
+              size="small"
+              style={{ marginBottom: 16 }}
+            >
+              <div style={{ marginBottom: 12 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Purpose</Text>
+                <div style={{ marginTop: 4 }}>
+                  <Text>{selectedRequest.purpose}</Text>
+                </div>
+              </div>
+              {selectedRequest.justification && (
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Justification</Text>
+                  <div style={{ marginTop: 4, padding: 12, background: '#fafafa', borderRadius: 4 }}>
+                    <Text style={{ whiteSpace: 'pre-wrap' }}>{selectedRequest.justification}</Text>
+                  </div>
+                </div>
+              )}
+              {selectedRequest.notes && (
+                <div style={{ marginTop: 12 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Additional Notes</Text>
+                  <div style={{ marginTop: 4, padding: 12, background: '#fafafa', borderRadius: 4 }}>
+                    <Text style={{ whiteSpace: 'pre-wrap' }}>{selectedRequest.notes}</Text>
+                  </div>
+                </div>
+              )}
+            </Card>
+
+            {/* Line Items */}
+            {selectedRequest.line_items && selectedRequest.line_items.length > 0 && (
+              <Card
+                title={
+                  <Space>
+                    <FileTextOutlined />
+                    <span>Line Items ({selectedRequest.line_items.length})</span>
+                  </Space>
+                }
+                size="small"
+                style={{ marginBottom: 16 }}
+              >
+                <Table
+                  dataSource={selectedRequest.line_items}
+                  pagination={false}
+                  size="small"
+                  rowKey={(_, index) => index?.toString() || '0'}
+                  columns={[
+                    {
+                      title: '#',
+                      key: 'index',
+                      width: 50,
+                      render: (_, __, index) => index + 1,
+                    },
+                    {
+                      title: 'Description',
+                      dataIndex: 'description',
+                      key: 'description',
+                    },
+                    {
+                      title: 'Currency',
+                      dataIndex: 'currency',
+                      key: 'currency',
+                      width: 100,
+                    },
+                    {
+                      title: 'Quantity',
+                      dataIndex: 'quantity',
+                      key: 'quantity',
+                      width: 100,
+                      align: 'right' as const,
+                      render: (qty) => parseFloat(qty).toLocaleString(),
+                    },
+                    {
+                      title: 'Unit Price',
+                      dataIndex: 'unit_price',
+                      key: 'unit_price',
+                      width: 120,
+                      align: 'right' as const,
+                      render: (price, record) => `${record.currency} ${parseFloat(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+                    },
+                    {
+                      title: 'Total',
+                      dataIndex: 'amount',
+                      key: 'amount',
+                      width: 150,
+                      align: 'right' as const,
+                      render: (amount, record) => (
+                        <Text strong style={{ color: '#52c41a' }}>
+                          {record.currency} {parseFloat(amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </Text>
+                      ),
+                    },
+                  ]}
+                  summary={(pageData) => {
+                    const total = pageData.reduce((sum, item) => sum + parseFloat(item.amount.toString()), 0);
+                    return (
+                      <Table.Summary fixed>
+                        <Table.Summary.Row>
+                          <Table.Summary.Cell index={0} colSpan={5} align="right">
+                            <Text strong>Grand Total:</Text>
+                          </Table.Summary.Cell>
+                          <Table.Summary.Cell index={1} align="right">
+                            <Text strong style={{ fontSize: 16, color: '#52c41a' }}>
+                              {selectedRequest.currency_display} {total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </Text>
+                          </Table.Summary.Cell>
+                        </Table.Summary.Row>
+                      </Table.Summary>
+                    );
+                  }}
+                />
+              </Card>
+            )}
+
+            {/* Verification Information */}
+            {selectedRequest.verified_by && (
+              <Card
+                title={
+                  <Space>
+                    <CheckOutlined />
+                    <span>Verification Information</span>
+                  </Space>
+                }
+                size="small"
+                style={{ marginBottom: 16 }}
+              >
+                <Descriptions column={1} size="small">
+                  <Descriptions.Item label="Verified By">
+                    {selectedRequest.verified_by_name}
+                  </Descriptions.Item>
+                  {selectedRequest.verified_date && (
+                    <Descriptions.Item label="Verification Date">
+                      {dayjs(selectedRequest.verified_date).format('DD/MM/YYYY HH:mm')}
+                    </Descriptions.Item>
+                  )}
+                </Descriptions>
+              </Card>
+            )}
+
+            {/* Approval Information */}
+            {(selectedRequest.approved_by || selectedRequest.rejection_reason) && (
+              <Card
+                title={
+                  <Space>
+                    <CheckOutlined />
+                    <span>Approval Information</span>
+                  </Space>
+                }
+                size="small"
+                style={{ marginBottom: 16 }}
+              >
+                <Descriptions column={1} size="small">
+                  {selectedRequest.approved_by_name && (
+                    <Descriptions.Item label="Approved By">
+                      {selectedRequest.approved_by_name}
+                    </Descriptions.Item>
+                  )}
+                  {selectedRequest.approved_date && (
+                    <Descriptions.Item label="Approval Date">
+                      {dayjs(selectedRequest.approved_date).format('DD/MM/YYYY HH:mm')}
+                    </Descriptions.Item>
+                  )}
+                  {selectedRequest.rejection_reason && (
+                    <Descriptions.Item label="Rejection Reason">
+                      <div style={{ padding: 12, background: '#fff1f0', borderRadius: 4, border: '1px solid #ffa39e' }}>
+                        <Text type="danger">{selectedRequest.rejection_reason}</Text>
+                      </div>
+                    </Descriptions.Item>
+                  )}
+                </Descriptions>
+              </Card>
+            )}
+
+            {/* Disbursement Information */}
+            {selectedRequest.disbursed_by && (
+              <Card
+                title={
+                  <Space>
+                    <WalletOutlined />
+                    <span>Disbursement Information</span>
+                  </Space>
+                }
+                size="small"
+                style={{ marginBottom: 16 }}
+              >
+                <Descriptions column={1} size="small">
+                  <Descriptions.Item label="Disbursed By">
+                    {selectedRequest.disbursed_by_name}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Disbursement Date">
+                    {dayjs(selectedRequest.disbursed_date).format('DD/MM/YYYY HH:mm')}
+                  </Descriptions.Item>
+                  {selectedRequest.receipt_number && (
+                    <Descriptions.Item label="Receipt Number">
+                      <Text code>{selectedRequest.receipt_number}</Text>
+                    </Descriptions.Item>
+                  )}
+                </Descriptions>
+              </Card>
+            )}
+
+            {/* Timeline */}
+            <Card
+              title={
+                <Space>
+                  <ClockCircleOutlined />
+                  <span>Timeline</span>
+                </Space>
+              }
+              size="small"
+              style={{ marginBottom: 16 }}
+            >
+              <Timeline>
+                <Timeline.Item color="blue">
+                  <Text strong>Request Created</Text>
+                  <br />
+                  <Text type="secondary">{dayjs(selectedRequest.created_at).format('DD/MM/YYYY HH:mm')}</Text>
                 </Timeline.Item>
-                {selectedRequest.status !== 'Pending' && (
-                  <Timeline.Item color={selectedRequest.status === 'Rejected' ? 'red' : 'blue'}>
-                    {selectedRequest.status === 'Approved' ? 'Request approved' :
-                     selectedRequest.status === 'Disbursed' ? 'Cash disbursed' :
-                     selectedRequest.status === 'Reconciled' ? 'Amount reconciled' : 'Request rejected'}
+                {selectedRequest.verified_date && (
+                  <Timeline.Item color="blue">
+                    <Text strong>Request Verified</Text>
+                    <br />
+                    <Text type="secondary">{dayjs(selectedRequest.verified_date).format('DD/MM/YYYY HH:mm')}</Text>
+                    <br />
+                    <Text type="secondary">by {selectedRequest.verified_by_name}</Text>
+                  </Timeline.Item>
+                )}
+                {selectedRequest.approved_date && (
+                  <Timeline.Item color="green">
+                    <Text strong>Request Approved</Text>
+                    <br />
+                    <Text type="secondary">{dayjs(selectedRequest.approved_date).format('DD/MM/YYYY HH:mm')}</Text>
+                    <br />
+                    <Text type="secondary">by {selectedRequest.approved_by_name}</Text>
+                  </Timeline.Item>
+                )}
+                {selectedRequest.disbursed_date && (
+                  <Timeline.Item color="purple">
+                    <Text strong>Cash Disbursed</Text>
+                    <br />
+                    <Text type="secondary">{dayjs(selectedRequest.disbursed_date).format('DD/MM/YYYY HH:mm')}</Text>
+                    <br />
+                    <Text type="secondary">by {selectedRequest.disbursed_by_name}</Text>
+                  </Timeline.Item>
+                )}
+                {selectedRequest.rejection_reason && (
+                  <Timeline.Item color="red">
+                    <Text strong>Request Rejected</Text>
+                    <br />
+                    <Text type="secondary">{selectedRequest.rejection_reason}</Text>
+                  </Timeline.Item>
+                )}
+                {selectedRequest.updated_at !== selectedRequest.created_at && (
+                  <Timeline.Item color="gray">
+                    <Text strong>Last Updated</Text>
+                    <br />
+                    <Text type="secondary">{dayjs(selectedRequest.updated_at).format('DD/MM/YYYY HH:mm')}</Text>
                   </Timeline.Item>
                 )}
               </Timeline>
-            </div>
+            </Card>
 
-            {selectedRequest.status === 'Pending' && (
-              <div style={{ marginTop: '24px' }}>
-                <Space direction="vertical" style={{ width: '100%' }}>
+            {/* Action Buttons */}
+            {selectedRequest.status === 'pending' && (
+              <div style={{
+                position: 'fixed',
+                bottom: 0,
+                right: 0,
+                width: 750,
+                padding: '16px 24px',
+                background: '#fff',
+                borderTop: '1px solid #f0f0f0',
+                zIndex: 1000
+              }}>
+                <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+                  <Button
+                    danger
+                    size="large"
+                    icon={<CloseOutlined />}
+                    onClick={() => handleReject()}
+                  >
+                    Reject Request
+                  </Button>
                   <Button
                     type="primary"
-                    block
                     size="large"
                     icon={<CheckOutlined />}
                     onClick={() => handleApprove()}
-                    style={{ background: '#00d084', borderColor: '#00d084' }}
+                    style={{ background: '#52c41a', borderColor: '#52c41a' }}
                   >
                     Approve Request
-                  </Button>
-                  <Button danger block size="large" icon={<CloseOutlined />} onClick={() => handleReject()}>
-                    Reject Request
                   </Button>
                 </Space>
               </div>

@@ -367,3 +367,51 @@ class FinanceWorkflowViewSet(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK
         )
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Override destroy to handle ProtectedError gracefully.
+        Returns user-friendly error message when workflow has associated approval requests.
+        """
+        from django.db.models.deletion import ProtectedError
+
+        workflow = self.get_object()
+
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError as e:
+            # Extract the protected objects from the error
+            protected_objects = e.protected_objects if hasattr(e, 'protected_objects') else set()
+
+            # Build list of approval request numbers
+            request_numbers = [
+                obj.request_number for obj in protected_objects
+                if hasattr(obj, 'request_number')
+            ]
+
+            # Create user-friendly error message
+            if request_numbers:
+                count = len(request_numbers)
+                sample_numbers = ', '.join(request_numbers[:5])  # Show first 5
+                more_text = f' and {count - 5} more' if count > 5 else ''
+
+                error_message = (
+                    f'Cannot delete this workflow because it is being used by {count} '
+                    f'approval request{"s" if count > 1 else ""} ({sample_numbers}{more_text}). '
+                    f'Please delete or reassign those requests first, or deactivate the workflow instead.'
+                )
+            else:
+                error_message = (
+                    'Cannot delete this workflow because it is being used by existing approval requests. '
+                    'Please delete or reassign those requests first, or deactivate the workflow instead.'
+                )
+
+            return Response(
+                {
+                    'error': error_message,
+                    'detail': str(e),
+                    'protected_count': len(protected_objects),
+                    'protected_requests': request_numbers[:10]  # Return up to 10 request numbers
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )

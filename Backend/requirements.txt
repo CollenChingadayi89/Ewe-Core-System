@@ -1,5 +1,5 @@
-# Core Django
-Django==4.2.7
+# Core Django (LTS - Python 3.14 compatible)
+Django==5.2.8
 
 # REST Framework
 djangorestframework==3.16.1
@@ -20,8 +20,8 @@ django-jazzmin==3.0.1
 # Image Processing (compatible with Python 3.13)
 Pillow>=10.4.0
 
-# PostgreSQL Database Adapter
-psycopg2-binary==2.9.9
+# PostgreSQL Database Adapter (commented out - using SQLite for now)
+# psycopg2-binary==2.9.9
 
 # Environment Variables (we're using os.environ now, so this is optional)
 # python-decouple==3.8

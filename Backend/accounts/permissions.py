@@ -82,6 +82,19 @@ class IsFinanceOrReadOnly(permissions.BasePermission):
         return False
 
 
+class IsFinanceOrCreateOnly(IsFinanceOrReadOnly):
+    """
+    Any authenticated user can read and create; only Finance staff can edit or delete.
+    Used for master data employees may need to add on the spot (e.g. a new vendor or
+    member while raising a payable), which stays under Finance control afterwards.
+    """
+
+    def has_permission(self, request, view):
+        if getattr(view, 'action', None) == 'create':
+            return bool(request.user and request.user.is_authenticated)
+        return super().has_permission(request, view)
+
+
 class IsOwnerOrHR(permissions.BasePermission):
     """
     Allows users to access their own data, or HR to access any employee data.
