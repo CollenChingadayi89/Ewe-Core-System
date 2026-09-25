@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Button, Avatar, Space, Row, Col, Tag, Modal, Form, Input, Select, DatePicker, InputNumber, message, Card, Typography, Divider, Checkbox, Radio, Upload } from 'antd';
+import { Button, Avatar, Space, Row, Col, Tag, Modal, Form, Input, Select, DatePicker, InputNumber, message, Card, Typography, Divider, Checkbox, Radio, Upload, Tabs } from 'antd';
+import { useSearchParams } from 'react-router-dom';
 import {
   PlusOutlined,
   DownloadOutlined,
@@ -26,11 +27,17 @@ import { employeeApi, type EmployeeListResponse } from '../../services/api/emplo
 import dayjs from 'dayjs';
 import type { UploadFile } from 'antd';
 import { ProcurementDetailsDrawer } from './ProcurementDetailsDrawer';
+import { AwardQuotationModal } from './AwardQuotationModal';
+import { CancelRequestModal } from '../approvals/CancelRequestModal';
+import { ProcurementRecordsTab } from './ProcurementRecordsTab';
+import { VendorSelect } from './VendorSelect';
+import { usePayablesStore } from '../../store/payablesStore';
 import {
   PROCUREMENT_CURRENCIES,
   QUOTATION_ALLOWED_EXTENSIONS,
   QUOTATION_MAX_FILE_SIZE_BYTES,
   type ProcurementCreateRequest,
+  type ProcurementDetailResponse,
 } from '../../services/api/procurement';
 
 const { TextArea } = Input;
@@ -51,7 +58,23 @@ export const ProcurementPage = () => {
   const [isForEmployee, setIsForEmployee] = useState(false);
   const [selectedCurrency, setSelectedCurrency] = useState('ZWG');
   const [submitting, setSubmitting] = useState(false);
+  const [activeTab, setActiveTab] = useState<'requests' | 'records'>('requests');
+  const [awardTarget, setAwardTarget] = useState<ProcurementDetailResponse | null>(null);
+  // The requester withdraws their request (before final approval)
+  const [cancelTarget, setCancelTarget] = useState<ProcurementDetailResponse | null>(null);
   const [form] = Form.useForm();
+  const quotationValues: { vendor_id?: string }[] = Form.useWatch('quotations', form) ?? [];
+
+  // ?record=<id> (e.g. from a "set payment terms" notification) opens that procurement record
+  const [searchParams, setSearchParams] = useSearchParams();
+  const recordParam = searchParams.get('record');
+  const currentTab = recordParam ? 'records' : activeTab;
+  const clearRecordParam = () => {
+    if (recordParam) setSearchParams({}, { replace: true });
+  };
+
+  // Vendors/suppliers for quotations (with "+" to add a missing one)
+  const { vendors, fetchVendors, addVendor } = usePayablesStore();
 
   // Zustand stores
   const {
@@ -79,7 +102,8 @@ export const ProcurementPage = () => {
   useEffect(() => {
     fetchRequests();
     fetchEmployeesList();
-  }, [fetchRequests, fetchEmployeesList]);
+    fetchVendors();
+  }, [fetchRequests, fetchEmployeesList, fetchVendors]);
 
   // Map API procurement to component format
   const mapApiProcurementToComponent = (apiProcurement: any): ProcurementRequest => ({
@@ -94,7 +118,7 @@ export const ProcurementPage = () => {
     requestedDate: apiProcurement.request_date ? dayjs(apiProcurement.request_date).format('DD/MM/YYYY') : '',
     requiredByDate: apiProcurement.required_by_date ? dayjs(apiProcurement.required_by_date).format('DD/MM/YYYY') : '',
     status: apiProcurement.status_display || apiProcurement.status || 'Pending',
-    vendor: apiProcurement.preferred_vendor || undefined,
+    vendor: apiProcurement.vendor_name || undefined,
     avatar: (apiProcurement.employee_name || apiProcurement.requested_by_name || 'U')
       .split(' ')
       .map((n: string) => n[0])
@@ -235,17 +259,17 @@ export const ProcurementPage = () => {
       // Each quotation's document is uploaded alongside the request, in the same order
       const quotationsArray = Array.isArray(values.quotations) ? values.quotations : [];
       const quotationDocuments: File[] = [];
-      for (const q of quotationsArray) {
+      for (const [index, q] of quotationsArray.entries()) {
         const file = (q.document as UploadFile[] | undefined)?.[0]?.originFileObj;
         if (!file) {
-          message.error(`Please upload a document for quotation from "${q.vendor_name}".`);
+          message.error(`Please upload the document for quotation ${index + 1}.`);
           return;
         }
         quotationDocuments.push(file);
       }
       const quotations = quotationsArray.map((q: any) => ({
-        vendor_name: q.vendor_name,
-        is_selected: false, // No winner selection at request stage
+        vendor_id: q.vendor_id,
+        is_selected: false, // The final approver selects the winner
       }));
 
       // Calculate total from line items
@@ -692,17 +716,44 @@ export const ProcurementPage = () => {
         </Row>
       </div>
 
-      <FilterBar
-        filters={filters}
-        onSearch={setSearchTerm}
-        onReset={handleReset}
-      />
-
-      <DataTable
-        columns={columns}
-        dataSource={filteredRequests}
-        rowKey="id"
-        scroll={{ x: 1800 }}
+      <Tabs
+        activeKey={currentTab}
+        onChange={(key) => {
+          clearRecordParam();
+          setActiveTab(key as 'requests' | 'records');
+        }}
+        items={[
+          {
+            key: 'requests',
+            label: 'Requests',
+            children: (
+              <>
+                <FilterBar
+                  filters={filters}
+                  onSearch={setSearchTerm}
+                  onReset={handleReset}
+                />
+                <DataTable
+                  columns={columns}
+                  dataSource={filteredRequests}
+                  rowKey="id"
+                  scroll={{ x: 1800 }}
+                />
+              </>
+            ),
+          },
+          {
+            key: 'records',
+            label: 'Procurement Records',
+            children: (
+              <ProcurementRecordsTab
+                key={recordParam ?? 'records'}
+                initialRecordId={recordParam}
+                onRecordClosed={clearRecordParam}
+              />
+            ),
+          },
+        ]}
       />
 
       {/* Request Modal */}
@@ -750,6 +801,7 @@ export const ProcurementPage = () => {
                       <Select.Option value="rental">Rental</Select.Option>
                       <Select.Option value="lease">Lease</Select.Option>
                       <Select.Option value="service">Service Contract</Select.Option>
+                      <Select.Option value="installment">Installment Purchase</Select.Option>
                     </Select>
                   </Form.Item>
                 </Col>
@@ -1065,12 +1117,18 @@ export const ProcurementPage = () => {
                         }
                       >
                         <Form.Item
-                          name={[field.name, 'vendor_name']}
-                          label="Vendor Name"
-                          rules={[{ required: true, message: 'Required' }]}
+                          name={[field.name, 'vendor_id']}
+                          label="Vendor / Supplier"
+                          rules={[{ required: true, message: 'Select the vendor' }]}
                           style={{ marginBottom: 8 }}
                         >
-                          <Input placeholder="Vendor name" size="small" />
+                          <VendorSelect
+                            vendors={vendors}
+                            onAddVendor={addVendor}
+                            disabledIds={quotationValues
+                              .map((q, i) => (i === index ? undefined : q?.vendor_id))
+                              .filter((id): id is string => Boolean(id))}
+                          />
                         </Form.Item>
                         <Form.Item
                           name={[field.name, 'document']}
@@ -1124,9 +1182,7 @@ export const ProcurementPage = () => {
                 <DatePicker
                   style={{width: '100%'}}
                   format="DD/MM/YYYY"
-                  disabledDate={(current) => {
-                    return current && current < dayjs().add(14, 'days');
-                  }}
+                  disabledDate={(current) => current && current.isBefore(dayjs(), 'day')}
                 />
               </Form.Item>
             </Col>
@@ -1191,6 +1247,41 @@ export const ProcurementPage = () => {
         open={detailsDrawerVisible}
         onClose={() => setDetailsDrawerVisible(false)}
         employeeNames={employeeNames}
+        onSelectWinner={setAwardTarget}
+        onCancelRequest={
+          selectedRequest
+            && selectedRequest.requested_by === user?.id
+            && ['pending', 'in_progress', 'escalated'].includes(selectedRequest.approval?.status ?? '')
+            ? setCancelTarget
+            : undefined
+        }
+        onOpenRecord={(recordId) => {
+          setDetailsDrawerVisible(false);
+          setSearchParams({ record: recordId });
+        }}
+      />
+
+      <CancelRequestModal
+        key={cancelTarget?.id ?? 'none'}
+        approvalRequestId={cancelTarget?.approval?.id ?? null}
+        requestLabel={cancelTarget?.request_number}
+        onClose={() => setCancelTarget(null)}
+        onCancelled={() => {
+          message.success(`${cancelTarget?.request_number} cancelled. Everyone in the approval workflow has been notified.`);
+          setCancelTarget(null);
+          fetchRequests();
+        }}
+      />
+
+      <AwardQuotationModal
+        key={awardTarget?.id ?? 'none'}
+        procurement={awardTarget}
+        onClose={() => setAwardTarget(null)}
+        onAwarded={(updated) => {
+          setAwardTarget(null);
+          message.success(`${updated.request_number} approved and awarded to ${updated.vendor_name}`);
+          fetchRequests();
+        }}
       />
     </div>
   );

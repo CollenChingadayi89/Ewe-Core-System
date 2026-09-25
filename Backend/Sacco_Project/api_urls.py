@@ -33,7 +33,7 @@ from finance_receivable.views import ReceivableViewSet, ReceivablePaymentViewSet
 from finance_payable.views import VendorViewSet, PayableViewSet
 from finance_expense.views import ExpenseViewSet
 from finance_petty_cash.views import PettyCashViewSet
-from finance_procurement.views import ProcurementRequestViewSet
+from finance_procurement.views import ProcurementRequestViewSet, ProcurementRecordViewSet
 from asset.views import AssetViewSet
 from vehicle.views import VehicleViewSet
 from document.views import DocumentCategoryViewSet, DocumentViewSet
@@ -121,6 +121,7 @@ router.register(r'petty-cash', PettyCashViewSet, basename='petty-cash')
 
 # Finance - Procurement
 router.register(r'procurement-requests', ProcurementRequestViewSet, basename='procurement-request')
+router.register(r'procurement-records', ProcurementRecordViewSet, basename='procurement-record')
 
 # ============================================================================
 # ASSET MANAGEMENT ENDPOINTS

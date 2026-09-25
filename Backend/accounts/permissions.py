@@ -56,6 +56,19 @@ class IsHROrReadOnly(permissions.BasePermission):
         return False
 
 
+FINANCE_ROLES = ('finance_manager', 'finance_employee')
+
+
+def is_finance_user(user) -> bool:
+    """Staff, superusers and employees with a Finance role."""
+    if not user or not user.is_authenticated:
+        return False
+    if user.is_staff or user.is_superuser:
+        return True
+    employee = getattr(user, 'employee_profile', None)
+    return employee is not None and employee.role in FINANCE_ROLES
+
+
 class IsFinanceOrReadOnly(permissions.BasePermission):
     """
     Allows Finance staff to edit financial data, others can only read.

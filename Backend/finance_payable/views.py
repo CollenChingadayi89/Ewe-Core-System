@@ -16,7 +16,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from accounts.permissions import IsFinanceOrCreateOnly
 from approval.models import ApprovalRequest
 
-from .models import Vendor, Payable
+from .models import Vendor, Payable, PayableInstallment
 from .permissions import PayablePermission, get_employee
 from .serializers import (
     VendorListSerializer,
@@ -26,11 +26,14 @@ from .serializers import (
     PayableDetailSerializer,
     PayableCreateUpdateSerializer,
     MarkPaidSerializer,
+    RescheduleSerializer,
 )
 from .services import (
+    attach_procurement_installments,
     generate_payable_number,
     payable_is_editable,
     record_payment,
+    reschedule_payable,
     submit_for_approval,
     sync_approval_request,
 )
@@ -172,7 +175,11 @@ class PayableViewSet(viewsets.ModelViewSet):
             queryset=ApprovalRequest.objects.select_related('workflow', 'current_approver')
             .order_by('-created_at'),
             to_attr='prefetched_approvals',
-        )
+        ),
+        Prefetch(
+            'installment_links',
+            queryset=PayableInstallment.objects.select_related('installment__record__procurement'),
+        ),
     )
 
     permission_classes = [PayablePermission]
@@ -258,13 +265,17 @@ class PayableViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        installment_ids = serializer.validated_data.pop('procurement_installments', None)
         with transaction.atomic():
             payable = serializer.save(
                 payable_number=generate_payable_number(),
                 status='pending',
                 submitted_by=employee,
                 created_by=request.user,
+                requested_collection_date=serializer.validated_data.get('collection_date'),
             )
+            if installment_ids:
+                attach_procurement_installments(payable, installment_ids)
             submit_for_approval(payable, employee)
 
         return self._detail_response(payable.id, status.HTTP_201_CREATED)
@@ -293,6 +304,24 @@ class PayableViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'], url_path='reschedule')
+    def reschedule(self, request, pk=None):
+        """
+        The approver whose turn it is moves the payment/collection date.
+        POST /payables/{id}/reschedule/  {"collection_date": "2026-10-15", "reason": "Funds available mid-month"}
+        """
+        payable = self.get_object()
+        employee = get_employee(request.user)
+        if employee is None:
+            return Response({'error': 'Only employees can change payment dates.'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = RescheduleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reschedule_payable(
+            payable.id, employee, serializer.validated_data['collection_date'], serializer.validated_data['reason']
+        )
+        return self._detail_response(payable.id)
 
     @action(detail=True, methods=['post'], url_path='mark-paid')
     def mark_paid(self, request, pk=None):

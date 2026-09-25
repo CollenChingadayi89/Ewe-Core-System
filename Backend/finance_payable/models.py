@@ -170,7 +170,13 @@ class Payable(BaseModel):
         blank=True,
         null=True,
         verbose_name='Collection Date',
-        help_text='Scheduled payment date'
+        help_text='Scheduled payment/collection date (approvers may move it; see PayableDateChange)'
+    )
+    requested_collection_date = models.DateField(
+        blank=True,
+        null=True,
+        verbose_name='Requested Collection Date',
+        help_text='Date originally requested when the payable was raised'
     )
     paid_date = models.DateField(blank=True, null=True, verbose_name='Date Paid')
 
@@ -201,6 +207,16 @@ class Payable(BaseModel):
         null=True,
         verbose_name='Mobile Money Number',
         help_text='EcoCash / OneMoney / InnBucks number for mobile money payments'
+    )
+
+    # In-person collection: someone collects the payment (cash/cheque) at the office
+    in_person_collection = models.BooleanField(default=False, verbose_name='Collected In Person')
+    collector_name = models.CharField(max_length=100, blank=True, null=True, verbose_name='Collector Name')
+    collector_id_number = models.CharField(max_length=50, blank=True, null=True, verbose_name='Collector ID Number')
+    collector_phone = models.CharField(max_length=20, blank=True, null=True, verbose_name='Collector Phone')
+    collector_id_verified = models.BooleanField(
+        default=False, verbose_name='Collector ID Verified',
+        help_text="Confirmed by the payer when recording the payment"
     )
 
     # Status & Approval
@@ -328,6 +344,10 @@ class Payable(BaseModel):
             return self.member.get_full_name() if self.member else ''
         return self.vendor.company_name if self.vendor else ''
 
+    def payable_name_line(self) -> str:
+        """e.g. 'PAY-2026-000012 (Rudo Moyo, ZWG 250.00)' for messages."""
+        return f"{self.payable_number} ({self.payee_name}, {self.currency} {self.total_amount:,.2f})"
+
     @property
     def payee_reference(self) -> str:
         """Vendor code or member number."""
@@ -346,3 +366,47 @@ class Payable(BaseModel):
         if self.status in ['approved', 'pending']:
             return self.due_date < timezone.now().date()
         return False
+
+
+class PayableDateChange(models.Model):
+    """
+    Audit trail of an approver moving a payable's payment/collection date
+    (e.g. funds not yet available, or the payout needs notice). Never edited.
+    """
+    payable = models.ForeignKey(Payable, on_delete=models.CASCADE, related_name='date_changes')
+    old_date = models.DateField(blank=True, null=True, verbose_name='Previous Date')
+    new_date = models.DateField(verbose_name='New Date')
+    reason = models.TextField(verbose_name='Reason')
+    changed_by = models.ForeignKey(
+        'hr_employee.Employee', on_delete=models.PROTECT, related_name='payable_date_changes'
+    )
+    stage_name = models.CharField(max_length=100, blank=True, default='', verbose_name='Approval Stage')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'finance_payable_date_change'
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.payable.payable_number}: {self.old_date} → {self.new_date}"
+
+
+class PayableInstallment(models.Model):
+    """
+    Procurement installments a payable settles. While the payable is open (pending/approved)
+    the installment is reserved; when it is paid, the amount is applied to the installment.
+    """
+    payable = models.ForeignKey(Payable, on_delete=models.CASCADE, related_name='installment_links')
+    installment = models.ForeignKey(
+        'finance_procurement.ProcurementInstallment', on_delete=models.PROTECT, related_name='payable_links'
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name='Amount')
+
+    class Meta:
+        db_table = 'finance_payable_installment'
+        constraints = [
+            models.UniqueConstraint(fields=['payable', 'installment'], name='unique_payable_installment'),
+        ]
+
+    def __str__(self):
+        return f"{self.payable.payable_number} → {self.installment}"

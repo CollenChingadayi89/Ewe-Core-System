@@ -16,6 +16,7 @@ import type {
   PayableListResponse,
   PayableCreateRequest,
   MarkPaidRequest,
+  RescheduleRequest,
 } from '../services/api/payables';
 import { approvalRequestApi } from '../services/api/approval';
 
@@ -41,6 +42,8 @@ interface PayablesState {
   approvePayable: (payable: PayableListResponse, comments?: string) => Promise<void>;
   rejectPayable: (payable: PayableListResponse, comments: string) => Promise<void>;
   markAsPaid: (payableId: string, data: MarkPaidRequest) => Promise<void>;
+  /** Approver moves the payment/collection date */
+  reschedulePayable: (payableId: string, data: RescheduleRequest) => Promise<void>;
   deletePayable: (payableId: string) => Promise<void>;
 }
 
@@ -112,6 +115,13 @@ export const usePayablesStore = create<PayablesState>()(
 
       markAsPaid: async (payableId: string, data: MarkPaidRequest) => {
         const updated = await payableApi.markPaid(payableId, data);
+        set(state => ({
+          payables: state.payables.map(p => (p.id === payableId ? updated : p)),
+        }));
+      },
+
+      reschedulePayable: async (payableId: string, data: RescheduleRequest) => {
+        const updated = await payableApi.reschedule(payableId, data);
         set(state => ({
           payables: state.payables.map(p => (p.id === payableId ? updated : p)),
         }));

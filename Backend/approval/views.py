@@ -23,11 +23,9 @@ from .serializers import (
     ApprovalStepSerializer,
     NotificationSerializer
 )
-from .services import ApprovalActionError, approve_current_stage, reject_current_stage
+from .services import ApprovalActionError, approve_current_stage, cancel_request, reject_current_stage
 from .utils import (
-    update_content_object_status,
     notify_approval_required,
-    notify_request_cancelled,
     notify_request_escalated,
     notify_request_created
 )
@@ -413,61 +411,14 @@ class ApprovalRequestViewSet(viewsets.ModelViewSet):
             "reason": "Required cancellation reason"
         }
 
-        Behavior:
-        1. Verify user is requester or admin
-        2. Mark request as cancelled
-        3. Update content_object status (if applicable)
+        The requester (or an admin) can cancel until the request is fully approved.
+        Everyone in the workflow is notified. See approval.services.cancel_request.
         """
         approval_request = self.get_object()
-        reason = request.data.get('reason', '')
-
-        if not reason:
-            return Response(
-                {'error': 'Cancellation reason is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Get current user's employee profile
         try:
-            user_employee = request.user.employee_profile
-        except AttributeError:
-            return Response(
-                {'error': 'User does not have an employee profile'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Verify user is requester or has permission
-        if approval_request.requester != user_employee and not request.user.is_staff:
-            return Response(
-                {'error': 'Only the requester or admin can cancel this request'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        # Check if request is in a state that can be cancelled
-        if approval_request.status in ['approved', 'rejected', 'cancelled']:
-            return Response(
-                {'error': f'Cannot cancel request with status: {approval_request.status}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        with transaction.atomic():
-            # Save current approver before nullifying
-            previous_approver = approval_request.current_approver
-
-            # Mark request as cancelled
-            approval_request.status = 'cancelled'
-            approval_request.rejection_reason = reason
-            approval_request.rejected_by = user_employee
-            approval_request.rejection_date = timezone.now()
-            approval_request.current_approver = None
-            approval_request.save()
-
-            # Update content_object status (no approval step for cancellation)
-            update_content_object_status(approval_request, approved_step=None, action='cancel')
-
-            # Notify previous approver if exists
-            if previous_approver:
-                notify_request_cancelled(approval_request, user_employee, reason)
+            cancel_request(approval_request, request.user, request.data.get('reason', ''))
+        except ApprovalActionError as exc:
+            return Response({'error': exc.message}, status=exc.status_code)
 
         serializer = ApprovalRequestDetailSerializer(approval_request)
         return Response(serializer.data)

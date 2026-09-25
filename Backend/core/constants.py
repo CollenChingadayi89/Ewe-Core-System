@@ -127,6 +127,7 @@ class PayableCategory:
     INSURANCE = 'insurance'
     TAXES = 'taxes'
     SALARIES = 'salaries'
+    PROCUREMENT = 'procurement'
     OTHER = 'other'
 
     # Member payouts
@@ -145,6 +146,7 @@ class PayableCategory:
         (INSURANCE, 'Insurance'),
         (TAXES, 'Taxes & Fees'),
         (SALARIES, 'Salaries & Wages'),
+        (PROCUREMENT, 'Procurement / Supplier Contract'),
         (OTHER, 'Other'),
     ]
     MEMBER_CHOICES = [

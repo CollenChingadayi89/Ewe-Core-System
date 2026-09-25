@@ -24,7 +24,8 @@ class PayablePermission(permissions.BasePermission):
         return bool(request.user and request.user.is_authenticated)
 
     def has_object_permission(self, request, view, obj):
-        if request.method in permissions.SAFE_METHODS or view.action == 'mark_paid':
+        # mark_paid / reschedule are authorised by the workflow in services.py
+        if request.method in permissions.SAFE_METHODS or view.action in ('mark_paid', 'reschedule'):
             return True
         if request.user.is_staff or request.user.is_superuser:
             return True

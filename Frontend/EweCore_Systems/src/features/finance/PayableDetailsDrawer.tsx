@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Drawer, Descriptions, Tag, Typography, Steps, Spin, Alert, Button, Space } from 'antd';
-import { CheckOutlined, CloseOutlined, DollarOutlined } from '@ant-design/icons';
+import { Drawer, Descriptions, Tag, Typography, Steps, Spin, Alert, Button, Space, Table } from 'antd';
+import { CalendarOutlined, CheckOutlined, CloseOutlined, DollarOutlined, StopOutlined } from '@ant-design/icons';
 import { StatusTag } from '../../components/common';
 import { payableApi, type PayableDetailResponse, type PayableListResponse } from '../../services/api/payables';
 import { approvalRequestApi, type ApprovalRequestDetailResponse } from '../../services/api/approval';
@@ -14,6 +14,8 @@ interface PayableDetailsDrawerProps {
   payable: PayableListResponse | null;
   onClose: () => void;
   onAction: (payable: PayableListResponse, action: PayableAction) => void;
+  /** Provided when the current user (the submitter) can cancel this payable */
+  onCancelRequest?: (payable: PayableListResponse) => void;
 }
 
 const Section = ({ title, children }: { title: string; children: ReactNode }) => (
@@ -30,7 +32,7 @@ const ACTION_LABELS: Record<string, string> = {
 /**
  * Mount one instance per payable (`key={payable.id}`) so each opens in the loading state.
  */
-export const PayableDetailsDrawer = ({ payable, onClose, onAction }: PayableDetailsDrawerProps) => {
+export const PayableDetailsDrawer = ({ payable, onClose, onAction, onCancelRequest }: PayableDetailsDrawerProps) => {
   const [detail, setDetail] = useState<PayableDetailResponse | null>(null);
   const [approval, setApproval] = useState<ApprovalRequestDetailResponse | null>(null);
   const [failed, setFailed] = useState(false);
@@ -119,7 +121,12 @@ export const PayableDetailsDrawer = ({ payable, onClose, onAction }: PayableDeta
               </>
             )}
             <Descriptions.Item label="Due Date">{formatDate(detail.due_date)}</Descriptions.Item>
-            <Descriptions.Item label="Scheduled Payment">{formatDate(detail.collection_date)}</Descriptions.Item>
+            <Descriptions.Item label="Payment / Collection">
+              {formatDate(detail.collection_date)}
+              {detail.requested_collection_date && detail.requested_collection_date !== detail.collection_date && (
+                <Text type="secondary"> (requested {formatDate(detail.requested_collection_date)})</Text>
+              )}
+            </Descriptions.Item>
             <Descriptions.Item label="Description" span={{ xs: 1, sm: 2 }}>
               <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{detail.description}</Paragraph>
             </Descriptions.Item>
@@ -171,6 +178,66 @@ export const PayableDetailsDrawer = ({ payable, onClose, onAction }: PayableDeta
           </Descriptions>
         </Section>
 
+        {detail.date_changes.length > 0 && (
+          <Section title="Payment Date Changes">
+            <Table
+              size="small"
+              rowKey="id"
+              pagination={false}
+              dataSource={detail.date_changes}
+              columns={[
+                { title: 'When', dataIndex: 'created_at', key: 'created_at', render: (d: string) => formatDate(d, true) },
+                {
+                  title: 'Date', key: 'dates',
+                  render: (_, change) => `${formatDate(change.old_date)} → ${formatDate(change.new_date)}`,
+                },
+                {
+                  title: 'By', key: 'by',
+                  render: (_, change) => `${change.changed_by_name}${change.stage_name ? ` (${change.stage_name})` : ''}`,
+                },
+                { title: 'Reason', dataIndex: 'reason', key: 'reason' },
+              ]}
+            />
+          </Section>
+        )}
+
+        {detail.in_person_collection && (
+          <Section title="In-person Collection">
+            <Descriptions column={{ xs: 1, sm: 2 }} size="small" bordered>
+              <Descriptions.Item label="Collector">{detail.collector_name}</Descriptions.Item>
+              <Descriptions.Item label="ID Number">{detail.collector_id_number}</Descriptions.Item>
+              <Descriptions.Item label="Phone">{detail.collector_phone || '—'}</Descriptions.Item>
+              <Descriptions.Item label="Collection Date">{formatDate(detail.collection_date)}</Descriptions.Item>
+              {detail.status === 'paid' && (
+                <Descriptions.Item label="ID Checked" span={{ xs: 1, sm: 2 }}>
+                  {detail.collector_id_verified ? `Yes, by ${detail.paid_by_name}` : 'No'}
+                </Descriptions.Item>
+              )}
+            </Descriptions>
+          </Section>
+        )}
+
+        {detail.procurement_installments.length > 0 && (
+          <Section title="Procurement Installments Settled">
+            <Table
+              size="small"
+              rowKey="id"
+              pagination={false}
+              dataSource={detail.procurement_installments}
+              columns={[
+                { title: 'Record', dataIndex: 'record_number', key: 'record_number' },
+                { title: 'Item', dataIndex: 'item_description', key: 'item_description', ellipsis: true },
+                { title: 'Installment', dataIndex: 'label', key: 'label' },
+                { title: 'Due', dataIndex: 'due_date', key: 'due_date', render: (d: string) => formatDate(d) },
+                {
+                  title: 'Amount', dataIndex: 'amount', key: 'amount', align: 'right',
+                  render: (amount: string) => formatMoney(detail.currency, amount),
+                },
+              ]}
+            />
+          </Section>
+        )}
+
         <Section title="Approval">
           <Descriptions column={1} size="small" style={{ marginBottom: 12 }}>
             <Descriptions.Item label="Submitted by">
@@ -199,11 +266,17 @@ export const PayableDetailsDrawer = ({ payable, onClose, onAction }: PayableDeta
 
   const actions = payable && (
     <Space>
+      {onCancelRequest && (
+        <Button danger icon={<StopOutlined />} onClick={() => onCancelRequest(payable)}>Cancel Request</Button>
+      )}
       {canApproveOrReject(payable) && (
         <>
           <Button danger icon={<CloseOutlined />} onClick={() => onAction(payable, 'reject')}>Reject</Button>
           <Button type="primary" icon={<CheckOutlined />} onClick={() => onAction(payable, 'approve')}>Approve</Button>
         </>
+      )}
+      {payable.approval?.can_act && (
+        <Button icon={<CalendarOutlined />} onClick={() => onAction(payable, 'reschedule')}>Change Date</Button>
       )}
       {payable.can_mark_paid && (
         <Button type="primary" icon={<DollarOutlined />} onClick={() => onAction(payable, 'pay')}>Record Payment</Button>

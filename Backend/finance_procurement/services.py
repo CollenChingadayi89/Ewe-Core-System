@@ -26,7 +26,7 @@ ALLOWED_EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', 
 # Formats the browser can safely display inline; everything else is downloaded.
 INLINE_CONTENT_TYPES = {'application/pdf', 'image/png', 'image/jpeg'}
 # Quotation keys a client may send; all others (file metadata) are server-managed.
-CLIENT_QUOTATION_KEYS = ('vendor_name', 'is_selected')
+CLIENT_QUOTATION_KEYS = ('vendor_id', 'is_selected')
 
 
 def validate_quotation_uploads(quotations: Any, files: list[UploadedFile]) -> list[dict]:

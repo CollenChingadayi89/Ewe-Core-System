@@ -51,6 +51,11 @@ export const approvalProgress = (payable: PayableListResponse): string | null =>
   return `Stage ${approval.current_stage}/${approval.total_stages}: ${approval.current_stage_name}${who}`;
 };
 
+/** The submitter can cancel until the workflow is fully approved (i.e. before payment). */
+export const canCancelPayable = (payable: PayableListResponse, employeeId?: string) =>
+  Boolean(employeeId && payable.submitted_by === employeeId && payable.approval
+    && ['pending', 'in_progress', 'escalated'].includes(payable.approval.status));
+
 /** The payable can be approved or rejected by the current user (not yet at the Pay stage). */
 export const canApproveOrReject = (payable: PayableListResponse) =>
   Boolean(payable.approval?.can_act && payable.approval.current_action_type !== 'pay');

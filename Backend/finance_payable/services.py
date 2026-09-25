@@ -8,6 +8,8 @@ approval stages (verify / recommend / approve ...) followed by a Pay stage.
   - paid      when the Pay-stage assignee records the payment (record_payment)
   - rejected  if any approver rejects
 """
+from decimal import Decimal
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -18,6 +20,7 @@ from approval.services import (
     PAY_ACTION,
     ApprovalActionError,
     approve_current_stage,
+    current_action_type,
     get_stage_config,
     mark_awaiting_payment,
 )
@@ -55,14 +58,6 @@ def get_approval_request(payable: Payable) -> ApprovalRequest | None:
         .order_by('-created_at')
         .first()
     )
-
-
-def current_action_type(approval_request: ApprovalRequest | None) -> str | None:
-    """Action type ('approve', 'pay', ...) of the request's current stage."""
-    if approval_request is None:
-        return None
-    stage = get_stage_config(approval_request, approval_request.current_stage)
-    return stage.get('action_type', 'approve') if stage else None
 
 
 def _approval_metadata(payable: Payable) -> dict:
@@ -136,6 +131,79 @@ def _as_api_error(exc: ApprovalActionError) -> Exception:
     return ValidationError({'detail': exc.message})
 
 
+def attach_procurement_installments(payable: Payable, installment_ids: list) -> None:
+    """
+    Reserve procurement installments for a new vendor payable (inside the create transaction)
+    and set the payable's amount to what they still owe.
+    """
+    from finance_procurement.records import reserve_installments
+
+    installments = reserve_installments(payable, installment_ids)
+    payable.amount = sum((inst.outstanding for inst in installments), Decimal('0'))
+    payable.tax_amount = Decimal('0')
+    payable.save(update_fields=['amount', 'tax_amount', 'total_amount', 'updated_at'])
+
+
+def reschedule_payable(payable_id, employee, new_date, reason: str) -> Payable:
+    """
+    The approver whose turn it is moves the payment/collection date (e.g. funds are not
+    available yet, or the payout needs notice). The change is logged and the requester plus
+    everyone else in the workflow is notified.
+    """
+    from approval.services import workflow_participants
+    from approval.utils import create_notification
+    from .models import PayableDateChange
+
+    reason = (reason or '').strip()
+    if not reason:
+        raise ValidationError({'reason': 'Explain why the date is changing.'})
+    if new_date < timezone.localdate():
+        raise ValidationError({'collection_date': 'The new date cannot be in the past.'})
+
+    with transaction.atomic():
+        payable = Payable.objects.select_for_update().select_related('submitted_by').get(pk=payable_id)
+        approval_request = get_approval_request(payable)
+        if (
+            approval_request is None
+            or approval_request.status not in OPEN_APPROVAL_STATUSES
+            or approval_request.current_approver_id != employee.id
+        ):
+            raise PermissionDenied('Only the approver whose turn it is can change the payment date.')
+        if payable.collection_date == new_date:
+            raise ValidationError({'collection_date': 'That is already the scheduled date.'})
+
+        stage = get_stage_config(approval_request, approval_request.current_stage) or {}
+        old_date = payable.collection_date
+        PayableDateChange.objects.create(
+            payable=payable, old_date=old_date, new_date=new_date, reason=reason,
+            changed_by=employee, stage_name=stage.get('stage_name', ''),
+        )
+        payable.collection_date = new_date
+        payable.save(update_fields=['collection_date', 'updated_at'])
+
+        recipients = {e.id: e for e in workflow_participants(approval_request)}
+        recipients[payable.submitted_by_id] = payable.submitted_by
+        recipients.pop(employee.id, None)
+        old_text = old_date.strftime('%d/%m/%Y') if old_date else 'not set'
+        for recipient in recipients.values():
+            is_requester = recipient.id == payable.submitted_by_id
+            create_notification(
+                recipient=recipient,
+                notification_type='schedule_changed',
+                title=f'New payment date for {payable.payable_number}: {new_date:%d/%m/%Y}',
+                message=(
+                    f'{employee.get_full_name()} moved the payment/collection date for {payable.payable_name_line()} '
+                    f'from {old_text} to {new_date:%d/%m/%Y}.\n\nReason: {reason}'
+                    + ('\n\nPlease let the payee know.' if is_requester else '')
+                ),
+                approval_request=approval_request,
+                priority='high' if is_requester else 'medium',
+                action_url='/finance/payables',
+                metadata={'payable_id': str(payable.id), 'new_date': new_date.isoformat()},
+            )
+    return payable
+
+
 def record_payment(payable_id, employee, data: dict) -> Payable:
     """
     Record payment of an approved payable and complete the workflow's Pay stage.
@@ -157,11 +225,16 @@ def record_payment(payable_id, employee, data: dict) -> Payable:
 
         if payable.status != 'approved':
             raise ValidationError({'detail': f'Only approved payables can be marked as paid (status: {payable.status}).'})
+        if payable.in_person_collection and not data.get('collector_id_verified'):
+            raise ValidationError({
+                'collector_id_verified': f"Confirm you checked {payable.collector_name}'s ID before handing over the payment."
+            })
 
         payable.paid_date = data['paid_date']
         payable.payment_method = data['payment_method']
         payable.payment_reference = data.get('payment_reference') or None
         payable.paid_by = employee
+        payable.collector_id_verified = bool(payable.in_person_collection and data.get('collector_id_verified'))
         if data.get('notes'):
             payable.notes = f"{payable.notes or ''}\n[Paid] {data['notes']}".strip()
         payable.save()
@@ -180,5 +253,9 @@ def record_payment(payable_id, employee, data: dict) -> Payable:
         if payable.status != 'paid':
             payable.status = 'paid'
             payable.save(update_fields=['status', 'updated_at'])
+
+        # Reduce the procurement installments this payment settles (immutable ledger rows)
+        from finance_procurement.records import apply_payable_payment
+        apply_payable_payment(payable, employee)
 
     return payable

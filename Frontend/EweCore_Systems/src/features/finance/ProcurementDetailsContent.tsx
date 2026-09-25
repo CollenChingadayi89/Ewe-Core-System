@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
-import { Descriptions, Table, Typography, Tag, Empty, Button } from 'antd';
-import { EyeOutlined } from '@ant-design/icons';
+import { Descriptions, Table, Typography, Tag, Empty, Button, Alert } from 'antd';
+import { EyeOutlined, StopOutlined, TrophyOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { StatusTag, DocumentPreviewModal } from '../../components/common';
@@ -17,6 +17,11 @@ interface ProcurementDetailsContentProps {
   request: ProcurementDetailResponse;
   /** Maps employee IDs to display names, used for assigned employees. */
   employeeNames?: Record<string, string>;
+  /** Final approver: open the "select winner & approve" dialog. */
+  onSelectWinner?: (request: ProcurementDetailResponse) => void;
+  onOpenRecord?: (recordId: string) => void;
+  /** Provided when the current user (the requester) can cancel this request */
+  onCancelRequest?: (request: ProcurementDetailResponse) => void;
 }
 
 const formatMoney = (currency: string, value: number | string | null | undefined) => {
@@ -52,7 +57,15 @@ const LongText = ({ value }: { value: string | null | undefined }) =>
  * Shared by the procurement details drawer and the approvals page.
  * Render with `key={request.id}` so an open document preview doesn't carry over between requests.
  */
-export const ProcurementDetailsContent = ({ request, employeeNames = {} }: ProcurementDetailsContentProps) => {
+export const ProcurementDetailsContent = ({
+  request,
+  employeeNames = {},
+  onSelectWinner,
+  onOpenRecord,
+  onCancelRequest,
+}: ProcurementDetailsContentProps) => {
+  const canSelectWinner = Boolean(onSelectWinner && request.approval?.can_act && request.approval.is_final_stage);
+  const winner = request.selected_quotation_index != null ? request.quotations[request.selected_quotation_index] : null;
   const currency = request.currency || 'ZWG';
   const [preview, setPreview] = useState<{ index: number; fileName: string } | null>(null);
 
@@ -153,7 +166,7 @@ export const ProcurementDetailsContent = ({ request, employeeNames = {} }: Procu
           <Descriptions.Item label="Required By">{formatDate(request.required_by_date)}</Descriptions.Item>
           <Descriptions.Item label="Delivery Location">{request.delivery_location || '—'}</Descriptions.Item>
           <Descriptions.Item label="Budget Code">{request.budget_code || '—'}</Descriptions.Item>
-          <Descriptions.Item label="Preferred Vendor">{request.vendor_name || 'Not assigned'}</Descriptions.Item>
+          <Descriptions.Item label="Supplier">{request.vendor_name || 'Not yet awarded'}</Descriptions.Item>
           <Descriptions.Item label="Beneficiary">
             {request.is_for_employee ? 'Specific employee(s)' : 'Organization'}
           </Descriptions.Item>
@@ -221,6 +234,58 @@ export const ProcurementDetailsContent = ({ request, employeeNames = {} }: Procu
           </Descriptions.Item>
         </Descriptions>
       </Section>
+
+      {onCancelRequest && (
+        <Alert
+          type="warning"
+          style={{ marginBottom: 24 }}
+          title="This request is still going through approval. You can withdraw it; everyone in the approval workflow will be notified."
+          action={
+            <Button danger icon={<StopOutlined />} onClick={() => onCancelRequest(request)}>
+              Cancel Request
+            </Button>
+          }
+        />
+      )}
+
+      {canSelectWinner && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 24 }}
+          title="You are the final approver. Select the winning quotation and give your reason to approve."
+          action={
+            <Button type="primary" icon={<TrophyOutlined />} onClick={() => onSelectWinner?.(request)}>
+              Select winner & approve
+            </Button>
+          }
+        />
+      )}
+
+      {winner && (
+        <Section title="Award">
+          <Descriptions column={{ xs: 1, sm: 2 }} size="small" bordered>
+            <Descriptions.Item label="Winning Quotation">
+              <Text strong>{winner.vendor_name}</Text>
+            </Descriptions.Item>
+            <Descriptions.Item label="Selected By">
+              {request.selected_by_name || '—'} {request.selected_at ? `on ${formatDate(request.selected_at, true)}` : ''}
+            </Descriptions.Item>
+            <Descriptions.Item label="Reason" span={{ xs: 1, sm: 2 }}>
+              <LongText value={request.selection_reason} />
+            </Descriptions.Item>
+            {request.record && (
+              <Descriptions.Item label="Procurement Record" span={{ xs: 1, sm: 2 }}>
+                {onOpenRecord ? (
+                  <Button type="link" style={{ padding: 0 }} onClick={() => onOpenRecord(request.record!.id)}>
+                    {request.record.record_number}
+                  </Button>
+                ) : request.record.record_number}
+              </Descriptions.Item>
+            )}
+          </Descriptions>
+        </Section>
+      )}
 
       <Section title="Approval & Fulfilment">
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" bordered>

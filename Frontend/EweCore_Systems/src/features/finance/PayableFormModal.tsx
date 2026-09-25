@@ -1,10 +1,14 @@
 import { useState } from 'react';
-import { Modal, Form, Radio, Select, Input, InputNumber, DatePicker, Row, Col, Alert, Button, Space, Tooltip, Divider } from 'antd';
+import {
+  Modal, Form, Radio, Select, Input, InputNumber, DatePicker, Row, Col, Alert, Button, Space, Tooltip, Divider,
+  Switch, Typography,
+} from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
-import type { Dayjs } from 'dayjs';
+import dayjs, { type Dayjs } from 'dayjs';
 import {
   PAYABLE_CURRENCIES,
   vendorApi,
+  type PayableCollectionDetails,
   type PayableCreateRequest,
   type PayablePayToDetails,
   type PayeeType,
@@ -12,18 +16,24 @@ import {
   type VendorDetailResponse,
   type VendorListResponse,
 } from '../../services/api/payables';
+import { procurementRecordApi, type OutstandingInstallment } from '../../services/api/procurement';
 import type { MemberLookup } from '../../services/api/members';
 import { MemberSearchSelect } from './MemberSearchSelect';
-import { QuickAddVendorModal } from './QuickAddVendorModal';
 import { QuickAddMemberModal } from './QuickAddMemberModal';
-import { BANK_TRANSFER, MOBILE_MONEY, PAYMENT_METHODS, categoriesFor } from './payableUtils';
+import { VendorSelect } from './VendorSelect';
+import { InstallmentPicker } from './InstallmentPicker';
+import { BANK_TRANSFER, MOBILE_MONEY, PAYMENT_METHODS, categoriesFor, formatMoney } from './payableUtils';
 
 const { TextArea } = Input;
+const { Title, Text } = Typography;
 
-interface PayableFormValues extends PayablePayToDetails {
+const PROCUREMENT_CATEGORY = 'procurement';
+
+interface PayableFormValues extends PayablePayToDetails, PayableCollectionDetails {
   payee_type: PayeeType;
   vendor?: string;
   member?: string;
+  procurement_installments?: string[];
   category: string;
   currency: string;
   amount: number;
@@ -53,15 +63,24 @@ const emptyPayTo = Object.fromEntries(PAY_TO_FIELDS.map((f) => [f, undefined])) 
 
 const toIsoDate = (value?: Dayjs) => (value ? value.format('YYYY-MM-DD') : undefined);
 
+const SectionTitle = ({ children }: { children: string }) => (
+  <Title level={5} style={{ marginTop: 0, marginBottom: 16 }}>{children}</Title>
+);
+
 export const PayableFormModal = ({ open, vendors, onClose, onSubmit, onAddVendor }: PayableFormModalProps) => {
   const [form] = Form.useForm<PayableFormValues>();
   const [submitting, setSubmitting] = useState(false);
-  const [addVendorOpen, setAddVendorOpen] = useState(false);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [addedMembers, setAddedMembers] = useState<MemberLookup[]>([]);
+  const [installments, setInstallments] = useState<OutstandingInstallment[]>([]);
+  const [installmentsLoading, setInstallmentsLoading] = useState(false);
   const payeeType = Form.useWatch('payee_type', form) ?? 'vendor';
+  const vendorId = Form.useWatch('vendor', form);
   const currency = Form.useWatch('currency', form) ?? 'ZWG';
   const paymentMethod = Form.useWatch('payment_method', form);
+  const inPerson = Form.useWatch('in_person_collection', form) ?? false;
+  const selectedInstallmentIds = Form.useWatch('procurement_installments', form) ?? [];
+  const settlingInstallments = selectedInstallmentIds.length > 0;
 
   /** Pre-fill bank details from the vendor's record, without overwriting anything already typed. */
   const prefillFromVendor = (vendor: VendorDetailResponse) => {
@@ -81,7 +100,20 @@ export const PayableFormModal = ({ open, vendors, onClose, onSubmit, onAddVendor
     }
   };
 
-  const handleVendorSelected = async (vendorId: string) => {
+  const loadInstallments = async (vendorId: string) => {
+    setInstallmentsLoading(true);
+    try {
+      setInstallments(await procurementRecordApi.outstandingInstallments(vendorId));
+    } catch {
+      setInstallments([]);
+    } finally {
+      setInstallmentsLoading(false);
+    }
+  };
+
+  const handleVendorChanged = async (vendorId: string) => {
+    form.setFieldsValue({ procurement_installments: [] });
+    loadInstallments(vendorId);
     try {
       prefillFromVendor(await vendorApi.retrieve(vendorId));
     } catch {
@@ -89,11 +121,28 @@ export const PayableFormModal = ({ open, vendors, onClose, onSubmit, onAddVendor
     }
   };
 
-  const handleVendorAdded = (vendor: VendorDetailResponse) => {
-    setAddVendorOpen(false);
-    form.setFieldsValue({ vendor: vendor.id });
-    form.validateFields(['vendor']);
-    prefillFromVendor(vendor);
+  /** Settling installments fixes the category, currency and amount (the backend enforces the same). */
+  const handleInstallmentsChanged = (ids: string[]) => {
+    const selected = installments.filter((i) => ids.includes(i.id));
+    if (selected.length === 0) {
+      form.setFieldsValue({ category: undefined, amount: undefined });
+      return;
+    }
+    const total = selected.reduce((sum, i) => sum + Number(i.outstanding), 0);
+    const earliestDue = [...selected].sort((a, b) => a.due_date.localeCompare(b.due_date))[0];
+    form.setFieldsValue({
+      category: PROCUREMENT_CATEGORY,
+      currency: selected[0].currency,
+      amount: Math.round(total * 100) / 100,
+      tax_amount: 0,
+      description: form.getFieldValue('description') || selected
+        .map((i) => `${i.record_number} ${i.label} (${i.item_description})`)
+        .join('; ')
+        .slice(0, 500),
+    });
+    if (!form.getFieldValue('due_date')) {
+      form.setFieldsValue({ due_date: dayjs(earliestDue.due_date) });
+    }
   };
 
   const handleMemberAdded = (member: MemberLookup) => {
@@ -106,6 +155,7 @@ export const PayableFormModal = ({ open, vendors, onClose, onSubmit, onAddVendor
   const handleClose = () => {
     form.resetFields();
     setAddedMembers([]);
+    setInstallments([]);
     onClose();
   };
 
@@ -117,6 +167,7 @@ export const PayableFormModal = ({ open, vendors, onClose, onSubmit, onAddVendor
         payee_type: values.payee_type,
         vendor: isVendor ? values.vendor : undefined,
         member: isVendor ? undefined : values.member,
+        procurement_installments: isVendor && settlingInstallments ? values.procurement_installments : undefined,
         category: values.category,
         currency: values.currency,
         amount: values.amount.toFixed(2),
@@ -129,9 +180,14 @@ export const PayableFormModal = ({ open, vendors, onClose, onSubmit, onAddVendor
         priority: values.priority,
         description: values.description,
         notes: values.notes,
+        in_person_collection: Boolean(values.in_person_collection),
+        collector_name: values.in_person_collection ? values.collector_name : undefined,
+        collector_id_number: values.in_person_collection ? values.collector_id_number : undefined,
+        collector_phone: values.in_person_collection ? values.collector_phone : undefined,
         ...Object.fromEntries(PAY_TO_FIELDS.map((f) => [f, values[f] || undefined])),
       });
       form.resetFields();
+      setInstallments([]);
     } catch {
       // The API client already shows the server's validation message; keep the form open.
     } finally {
@@ -147,49 +203,44 @@ export const PayableFormModal = ({ open, vendors, onClose, onSubmit, onAddVendor
       onOk={form.submit}
       okText="Submit for Approval"
       confirmLoading={submitting}
-      width="min(720px, 100vw)"
+      width="min(1200px, 100vw)"
+      style={{ top: 24 }}
       destroyOnHidden
     >
       <Form
         form={form}
         layout="vertical"
         onFinish={handleFinish}
-        initialValues={{ payee_type: 'vendor', currency: 'ZWG', priority: 'medium' }}
+        initialValues={{ payee_type: 'vendor', currency: 'ZWG', priority: 'medium', in_person_collection: false }}
       >
-        <Form.Item label="Who is being paid?" name="payee_type">
-          <Radio.Group
-            optionType="button"
-            buttonStyle="solid"
-            onChange={() => form.setFieldsValue({ vendor: undefined, member: undefined, category: undefined, ...emptyPayTo })}
-            options={[
-              { value: 'vendor', label: 'Vendor / Supplier' },
-              { value: 'member', label: 'SACCO Member' },
-            ]}
-          />
-        </Form.Item>
+        <Row gutter={32}>
+          {/* ------------------------------------------------ Payee & amount */}
+          <Col xs={24} lg={12}>
+            <SectionTitle>Payee & Amount</SectionTitle>
+            <Form.Item label="Who is being paid?" name="payee_type">
+              <Radio.Group
+                optionType="button"
+                buttonStyle="solid"
+                onChange={() => {
+                  form.setFieldsValue({
+                    vendor: undefined, member: undefined, category: undefined, procurement_installments: [], ...emptyPayTo,
+                  });
+                  setInstallments([]);
+                }}
+                options={[
+                  { value: 'vendor', label: 'Vendor / Supplier' },
+                  { value: 'member', label: 'SACCO Member' },
+                ]}
+              />
+            </Form.Item>
 
-        <Row gutter={16}>
-          <Col xs={24} sm={12}>
             {payeeType === 'vendor' ? (
-              <Form.Item label="Vendor / Supplier" required>
-                <Space.Compact style={{ width: '100%' }}>
-                  <Form.Item name="vendor" noStyle rules={[{ required: true, message: 'Select the vendor to pay' }]}>
-                    <Select
-                      showSearch
-                      placeholder="Select vendor or supplier"
-                      optionFilterProp="label"
-                      notFoundContent="No match — use + to add a new vendor"
-                      onChange={handleVendorSelected}
-                      options={vendors.map((v) => ({
-                        value: v.id,
-                        label: `${v.company_name} (${v.vendor_code}) · ${v.vendor_type_display}`,
-                      }))}
-                    />
-                  </Form.Item>
-                  <Tooltip title="Add a new vendor or supplier">
-                    <Button icon={<PlusOutlined />} onClick={() => setAddVendorOpen(true)} aria-label="Add a new vendor" />
-                  </Tooltip>
-                </Space.Compact>
+              <Form.Item label="Vendor / Supplier" name="vendor" rules={[{ required: true, message: 'Select the vendor to pay' }]}>
+                <VendorSelect
+                  vendors={vendors}
+                  onAddVendor={onAddVendor}
+                  onChange={handleVendorChanged}
+                />
               </Form.Item>
             ) : (
               <Form.Item label="Member" required>
@@ -203,155 +254,204 @@ export const PayableFormModal = ({ open, vendors, onClose, onSubmit, onAddVendor
                 </Space.Compact>
               </Form.Item>
             )}
-          </Col>
-          <Col xs={24} sm={12}>
+
+            {payeeType === 'vendor' && vendorId && (
+              <Form.Item
+                label="Pending procurement installments"
+                name="procurement_installments"
+                tooltip="Tick the installments this payment settles. Leave empty for other bills from this vendor."
+              >
+                <InstallmentPicker
+                  installments={installments}
+                  loading={installmentsLoading}
+                  onChange={handleInstallmentsChanged}
+                />
+              </Form.Item>
+            )}
+
             <Form.Item label="Category" name="category" rules={[{ required: true, message: 'Select a category' }]}>
-              <Select placeholder="Select category" options={categoriesFor(payeeType)} />
+              <Select placeholder="Select category" options={categoriesFor(payeeType)} disabled={settlingInstallments} />
             </Form.Item>
-          </Col>
-        </Row>
 
+            <Row gutter={16}>
+              <Col xs={24} sm={8}>
+                <Form.Item label="Currency" name="currency" rules={[{ required: true }]}>
+                  <Select options={PAYABLE_CURRENCIES.map((c) => ({ value: c, label: c }))} disabled={settlingInstallments} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={payeeType === 'vendor' ? 8 : 16}>
+                <Form.Item
+                  label={`Amount (${currency})`}
+                  name="amount"
+                  rules={[
+                    { required: true, message: 'Enter the amount' },
+                    { type: 'number', min: 0.01, message: 'Amount must be greater than zero' },
+                  ]}
+                  extra={settlingInstallments ? 'Total outstanding on the selected installments' : undefined}
+                >
+                  <InputNumber style={{ width: '100%' }} min={0} precision={2} placeholder="0.00" disabled={settlingInstallments} />
+                </Form.Item>
+              </Col>
+              {payeeType === 'vendor' && (
+                <Col xs={24} sm={8}>
+                  <Form.Item label={`Tax / VAT (${currency})`} name="tax_amount">
+                    <InputNumber style={{ width: '100%' }} min={0} precision={2} placeholder="0.00" disabled={settlingInstallments} />
+                  </Form.Item>
+                </Col>
+              )}
+            </Row>
 
-        <Row gutter={16}>
-          <Col xs={24} sm={8}>
-            <Form.Item label="Currency" name="currency" rules={[{ required: true }]}>
-              <Select options={PAYABLE_CURRENCIES.map((c) => ({ value: c, label: c }))} />
-            </Form.Item>
+            {payeeType === 'vendor' && (
+              <Row gutter={16}>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Invoice Number" name="invoice_number">
+                    <Input placeholder="e.g. INV-2026-001" maxLength={50} />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Invoice Date" name="invoice_date" rules={[{ required: true, message: 'Select the invoice date' }]}>
+                    <DatePicker style={{ width: '100%' }} format="DD/MM/YYYY" />
+                  </Form.Item>
+                </Col>
+              </Row>
+            )}
           </Col>
-          <Col xs={24} sm={payeeType === 'vendor' ? 8 : 16}>
+
+          {/* ------------------------------------------------ Payment */}
+          <Col xs={24} lg={12}>
+            <SectionTitle>Payment</SectionTitle>
+            <Row gutter={16}>
+              <Col xs={24} sm={12}>
+                <Form.Item label="Payment Method" name="payment_method" rules={[{ required: true, message: 'Select a payment method' }]}>
+                  <Select placeholder="Select payment method" options={PAYMENT_METHODS.map((m) => ({ value: m, label: m }))} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12}>
+                <Form.Item label="Priority" name="priority" rules={[{ required: true }]}>
+                  <Select
+                    options={[
+                      { value: 'low', label: 'Low' },
+                      { value: 'medium', label: 'Medium' },
+                      { value: 'high', label: 'High' },
+                    ]}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+
+            {paymentMethod === BANK_TRANSFER && (
+              <Row gutter={16}>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Bank Name" name="pay_to_bank_name" rules={[{ required: true, message: 'Enter the bank' }]}>
+                    <Input maxLength={100} placeholder="e.g. CBZ Bank" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Branch" name="pay_to_bank_branch">
+                    <Input maxLength={100} />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Account Number" name="pay_to_account_number" rules={[{ required: true, message: 'Enter the account number' }]}>
+                    <Input maxLength={50} />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Account Holder" name="pay_to_account_name" rules={[{ required: true, message: 'Enter the account holder' }]}>
+                    <Input maxLength={100} />
+                  </Form.Item>
+                </Col>
+              </Row>
+            )}
+            {paymentMethod === MOBILE_MONEY && (
+              <Form.Item
+                label="Mobile Money Number"
+                name="pay_to_mobile_number"
+                rules={[{ required: true, message: 'Enter the mobile money number' }]}
+                tooltip="EcoCash, OneMoney or InnBucks number to send the money to"
+              >
+                <Input maxLength={20} placeholder="+263..." />
+              </Form.Item>
+            )}
+            {!paymentMethod && (
+              <Alert type="info" showIcon style={{ marginBottom: 16 }} title="Choose a payment method to enter where the money should go." />
+            )}
+
+            <Divider style={{ margin: '4px 0 16px' }} />
             <Form.Item
-              label={`Amount (${currency})`}
-              name="amount"
-              rules={[
-                { required: true, message: 'Enter the amount' },
-                { type: 'number', min: 0.01, message: 'Amount must be greater than zero' },
-              ]}
+              label="In-person collection"
+              name="in_person_collection"
+              valuePropName="checked"
+              tooltip="Someone will come to the office to collect the payment (e.g. cash or cheque). The payer checks their ID before handing it over."
             >
-              <InputNumber style={{ width: '100%' }} min={0} precision={2} placeholder="0.00" />
+              <Switch checkedChildren="Yes" unCheckedChildren="No" />
             </Form.Item>
+            {inPerson && (
+              <Row gutter={16}>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Collector's Name" name="collector_name" rules={[{ required: true, message: 'Who will collect?' }]}>
+                    <Input maxLength={100} />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Collector's ID Number" name="collector_id_number" rules={[{ required: true, message: 'Enter their national ID' }]}>
+                    <Input maxLength={50} placeholder="e.g. 63-123456A63" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Collector's Phone" name="collector_phone">
+                    <Input maxLength={20} placeholder="+263..." />
+                  </Form.Item>
+                </Col>
+              </Row>
+            )}
+
+            <Row gutter={16}>
+              <Col xs={24} sm={12}>
+                <Form.Item label="Due Date" name="due_date" rules={[{ required: true, message: 'Select the due date' }]}>
+                  <DatePicker style={{ width: '100%' }} format="DD/MM/YYYY" />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12}>
+                <Form.Item
+                  label={inPerson ? 'Requested Collection Date' : 'Requested Payment Date'}
+                  name="collection_date"
+                  tooltip={`${inPerson ? 'When the payee would like to come and collect' : 'When the payment should be made'}. `
+                    + 'Approvers may suggest a later date (e.g. if funds are not yet available); you will be notified.'}
+                >
+                  <DatePicker style={{ width: '100%' }} format="DD/MM/YYYY" />
+                </Form.Item>
+              </Col>
+            </Row>
           </Col>
-          {payeeType === 'vendor' && (
-            <Col xs={24} sm={8}>
-              <Form.Item label={`Tax / VAT (${currency})`} name="tax_amount">
-                <InputNumber style={{ width: '100%' }} min={0} precision={2} placeholder="0.00" />
-              </Form.Item>
-            </Col>
-          )}
         </Row>
 
-        {payeeType === 'vendor' && (
-          <Row gutter={16}>
-            <Col xs={24} sm={12}>
-              <Form.Item label="Invoice Number" name="invoice_number">
-                <Input placeholder="e.g. INV-2026-001" maxLength={50} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} sm={12}>
-              <Form.Item label="Invoice Date" name="invoice_date" rules={[{ required: true, message: 'Select the invoice date' }]}>
-                <DatePicker style={{ width: '100%' }} format="DD/MM/YYYY" />
-              </Form.Item>
-            </Col>
-          </Row>
-        )}
-
-        <Row gutter={16}>
-          <Col xs={24} sm={12}>
-            <Form.Item label="Due Date" name="due_date" rules={[{ required: true, message: 'Select the due date' }]}>
-              <DatePicker style={{ width: '100%' }} format="DD/MM/YYYY" />
-            </Form.Item>
-          </Col>
-          <Col xs={24} sm={12}>
-            <Form.Item label="Scheduled Payment Date" name="collection_date" tooltip="When the payment is planned to be made">
-              <DatePicker style={{ width: '100%' }} format="DD/MM/YYYY" />
-            </Form.Item>
-          </Col>
-        </Row>
-
-        <Row gutter={16}>
-          <Col xs={24} sm={12}>
-            <Form.Item label="Payment Method" name="payment_method" rules={[{ required: true, message: 'Select a payment method' }]}>
-              <Select placeholder="Select payment method" options={PAYMENT_METHODS.map((m) => ({ value: m, label: m }))} />
-            </Form.Item>
-          </Col>
-          <Col xs={24} sm={12}>
-            <Form.Item label="Priority" name="priority" rules={[{ required: true }]}>
-              <Select
-                options={[
-                  { value: 'low', label: 'Low' },
-                  { value: 'medium', label: 'Medium' },
-                  { value: 'high', label: 'High' },
-                ]}
+        <Row gutter={32}>
+          <Col xs={24} lg={12}>
+            <Form.Item label="Description" name="description" rules={[{ required: true, message: 'Describe what this payment is for' }]}>
+              <TextArea
+                rows={3}
+                maxLength={500}
+                showCount
+                placeholder={payeeType === 'member' ? 'e.g. 2026 dividend on 50 shares' : 'What is being paid for'}
               />
             </Form.Item>
           </Col>
+          <Col xs={24} lg={12}>
+            <Form.Item label="Notes" name="notes">
+              <TextArea rows={3} maxLength={300} showCount placeholder="Optional instructions for approvers or the payer" />
+            </Form.Item>
+          </Col>
         </Row>
 
-        <Divider titlePlacement="start" plain style={{ margin: '4px 0 16px' }}>Pay to</Divider>
-        {paymentMethod === BANK_TRANSFER && (
-          <>
-            <Row gutter={16}>
-              <Col xs={24} sm={12}>
-                <Form.Item label="Bank Name" name="pay_to_bank_name" rules={[{ required: true, message: 'Enter the bank' }]}>
-                  <Input maxLength={100} placeholder="e.g. CBZ Bank" />
-                </Form.Item>
-              </Col>
-              <Col xs={24} sm={12}>
-                <Form.Item label="Branch" name="pay_to_bank_branch">
-                  <Input maxLength={100} />
-                </Form.Item>
-              </Col>
-            </Row>
-            <Row gutter={16}>
-              <Col xs={24} sm={12}>
-                <Form.Item label="Account Number" name="pay_to_account_number" rules={[{ required: true, message: 'Enter the account number' }]}>
-                  <Input maxLength={50} />
-                </Form.Item>
-              </Col>
-              <Col xs={24} sm={12}>
-                <Form.Item label="Account Holder" name="pay_to_account_name" rules={[{ required: true, message: 'Enter the account holder' }]}>
-                  <Input maxLength={100} />
-                </Form.Item>
-              </Col>
-            </Row>
-          </>
+        {settlingInstallments && (
+          <Text type="secondary">
+            Settling {selectedInstallmentIds.length} installment(s) for {formatMoney(currency, form.getFieldValue('amount') || 0)}.
+            When this payable is marked paid, the procurement balance is reduced automatically.
+          </Text>
         )}
-        {paymentMethod === MOBILE_MONEY && (
-          <Form.Item
-            label="Mobile Money Number"
-            name="pay_to_mobile_number"
-            rules={[{ required: true, message: 'Enter the mobile money number' }]}
-            tooltip="EcoCash, OneMoney or InnBucks number to send the money to"
-          >
-            <Input maxLength={20} placeholder="+263..." />
-          </Form.Item>
-        )}
-        {!paymentMethod && (
-          <Alert type="info" showIcon style={{ marginBottom: 16 }} title="Choose a payment method to enter where the money should go." />
-        )}
-        {paymentMethod && paymentMethod !== BANK_TRANSFER && paymentMethod !== MOBILE_MONEY && (
-          <Alert type="info" showIcon style={{ marginBottom: 16 }} title={`${paymentMethod}: no account details needed.`} />
-        )}
-
-        <Form.Item label="Description" name="description" rules={[{ required: true, message: 'Describe what this payment is for' }]}>
-          <TextArea
-            rows={3}
-            maxLength={500}
-            showCount
-            placeholder={payeeType === 'member' ? 'e.g. 2026 dividend on 50 shares' : 'What is being paid for'}
-          />
-        </Form.Item>
-
-        <Form.Item label="Notes" name="notes">
-          <TextArea rows={2} maxLength={300} showCount placeholder="Optional instructions for approvers or the payer" />
-        </Form.Item>
       </Form>
 
-      <QuickAddVendorModal
-        open={addVendorOpen}
-        onClose={() => setAddVendorOpen(false)}
-        onCreate={onAddVendor}
-        onCreated={handleVendorAdded}
-      />
       <QuickAddMemberModal
         open={addMemberOpen}
         onClose={() => setAddMemberOpen(false)}

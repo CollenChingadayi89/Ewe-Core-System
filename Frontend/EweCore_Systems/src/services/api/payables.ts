@@ -5,6 +5,7 @@
  */
 
 import { get, post, put, patch, del } from './client';
+import type { ApprovalSummary } from './approval';
 import type { PaginatedResponse } from './types';
 
 // ============================================================================
@@ -128,6 +129,7 @@ export const VENDOR_PAYABLE_CATEGORIES = [
   { value: 'insurance', label: 'Insurance' },
   { value: 'taxes', label: 'Taxes & Fees' },
   { value: 'salaries', label: 'Salaries & Wages' },
+  { value: 'procurement', label: 'Procurement / Supplier Contract' },
   { value: 'other', label: 'Other' },
 ];
 
@@ -141,20 +143,7 @@ export const MEMBER_PAYABLE_CATEGORIES = [
 /** Must match CURRENCY_CHOICES in the backend. */
 export const PAYABLE_CURRENCIES = ['ZWG', 'USD'];
 
-/** Where a payable is in its approval workflow, from the viewer's point of view. */
-export interface PayableApprovalSummary {
-  id: string;
-  request_number: string;
-  status: 'pending' | 'in_progress' | 'approved' | 'rejected' | 'cancelled' | 'escalated';
-  current_stage: number;
-  total_stages: number;
-  current_stage_name: string | null;
-  /** 'approve', 'verify', 'recommend', ... or 'pay' for the payment stage */
-  current_action_type: string | null;
-  current_approver_name: string | null;
-  /** True when it is the current user's turn to act */
-  can_act: boolean;
-}
+export type PayableApprovalSummary = ApprovalSummary;
 
 /** Where the money goes. Which fields apply depends on the payment method. */
 export interface PayablePayToDetails {
@@ -199,8 +188,53 @@ export interface PayableListResponse extends PayablePayToDetails {
   approval: PayableApprovalSummary | null;
   /** True when the current user is the Pay-stage assignee and the payable is approved */
   can_mark_paid: boolean;
+  in_person_collection: boolean;
+  collector_name: string | null;
+  collector_id_number: string | null;
+  collector_phone: string | null;
+  collector_id_verified: boolean;
+  /** Procurement installments this payable settles */
+  procurement_installments: PayableProcurementInstallment[];
+  /** Payment/collection date asked for when raised; approvers may move collection_date */
+  requested_collection_date: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** An approver moved the payment/collection date (audit trail). */
+export interface PayableDateChange {
+  id: number;
+  old_date: string | null;
+  new_date: string;
+  reason: string;
+  changed_by_name: string;
+  stage_name: string;
+  created_at: string;
+}
+
+export interface RescheduleRequest {
+  /** YYYY-MM-DD, today or later */
+  collection_date: string;
+  reason: string;
+}
+
+export interface PayableProcurementInstallment {
+  id: string;
+  record_id: string;
+  record_number: string;
+  procurement_number: string;
+  item_description: string;
+  label: string;
+  due_date: string;
+  amount: string;
+}
+
+/** Someone collects the payment in person (cash/cheque); the payer checks their ID. */
+export interface PayableCollectionDetails {
+  in_person_collection?: boolean;
+  collector_name?: string;
+  collector_id_number?: string;
+  collector_phone?: string;
 }
 
 export interface PayableDetailResponse extends PayableListResponse {
@@ -223,6 +257,7 @@ export interface PayableDetailResponse extends PayableListResponse {
     account_status: string;
   } | null;
   payment_reference: string | null;
+  date_changes: PayableDateChange[];
   approved_date: string | null;
   rejection_reason: string | null;
   attachments: string[];
@@ -230,7 +265,9 @@ export interface PayableDetailResponse extends PayableListResponse {
 }
 
 
-export interface PayableCreateRequest extends PayablePayToDetails {
+export interface PayableCreateRequest extends PayablePayToDetails, PayableCollectionDetails {
+  /** Procurement installments to settle; the amount is then set from them (vendor payables) */
+  procurement_installments?: string[];
   payee_type: PayeeType;
   vendor?: string;
   member?: string;
@@ -255,6 +292,8 @@ export interface MarkPaidRequest {
   payment_method: string;
   payment_reference?: string;
   notes?: string;
+  /** Required (true) for in-person collection: the payer checked the collector's ID */
+  collector_id_verified?: boolean;
 }
 
 // ============================================================================
@@ -388,6 +427,14 @@ export const payableApi = {
   // Approve / reject go through the approval workflow:
   // approvalRequestApi.approve/reject(payable.approval.id, ...)
   // ============================================================================
+
+  /**
+   * Move the payment/collection date (approver whose turn it is; reason required)
+   */
+  reschedule: async (id: string, data: RescheduleRequest): Promise<PayableDetailResponse> => {
+    const response = await post<PayableDetailResponse>(`/payables/${id}/reschedule/`, data);
+    return response.data;
+  },
 
   /**
    * Record payment and complete the workflow's Pay stage (Pay-stage assignee only)

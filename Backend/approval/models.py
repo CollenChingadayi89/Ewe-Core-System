@@ -645,6 +645,8 @@ class Notification(BaseModel):
             ('stage_advanced', 'Stage Advanced'),
             ('request_created', 'Request Created'),
             ('reminder', 'Reminder'),
+            ('action_required', 'Action Required'),
+            ('schedule_changed', 'Schedule Changed'),
         ],
         verbose_name='Notification Type'
     )

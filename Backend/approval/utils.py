@@ -430,8 +430,10 @@ def update_content_object_status(approval_request, approved_step=None, action='a
                 content_object.rejection_reason = approved_step.comments or 'Rejected'
 
         elif action == 'cancel':
-            # Cancellation sets status to 'cancelled'
-            content_object.status = 'cancelled'
+            # Cancellation sets status to 'cancelled' (if the object has that status)
+            status_choices = {v for v, _ in content_object._meta.get_field('status').choices or []}
+            if not status_choices or 'cancelled' in status_choices:
+                content_object.status = 'cancelled'
 
         elif action == 'approve' and approved_step:
             # Get workflow stages configuration

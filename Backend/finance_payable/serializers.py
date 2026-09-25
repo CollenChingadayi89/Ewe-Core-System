@@ -9,11 +9,11 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
-from approval.services import PAY_ACTION, get_stage_config
+from approval.services import PAY_ACTION, approval_summary
 from core.constants import PayableCategory, PayeeType
 
-from .models import Vendor, Payable
-from .services import OPEN_APPROVAL_STATUSES, current_action_type, get_approval_request
+from .models import Vendor, Payable, PayableDateChange
+from .services import get_approval_request
 
 
 # ============================================================================
@@ -220,33 +220,19 @@ PAY_TO_ALLOWED = {
     MOBILE_MONEY: ['pay_to_mobile_number'],
 }
 
-def approval_summary(payable, employee_id):
-    """
-    Where the payable is in its approval workflow, and whether the viewer can act now.
-    can_act mirrors the approval engine's check (current approver + open request).
-    """
-    approval_request = get_approval_request(payable)
-    if approval_request is None:
-        return None
-    stages = approval_request.workflow.stages if approval_request.workflow else []
-    stage = get_stage_config(approval_request, approval_request.current_stage)
-    is_open = approval_request.status in OPEN_APPROVAL_STATUSES
-    return {
-        'id': str(approval_request.id),
-        'request_number': approval_request.request_number,
-        'status': approval_request.status,
-        'current_stage': approval_request.current_stage,
-        'total_stages': len(stages),
-        'current_stage_name': stage.get('stage_name') if stage and is_open else None,
-        'current_action_type': current_action_type(approval_request) if is_open else None,
-        'current_approver_name': (
-            approval_request.current_approver.get_full_name()
-            if is_open and approval_request.current_approver else None
-        ),
-        'can_act': bool(
-            is_open and employee_id and approval_request.current_approver_id == employee_id
-        ),
-    }
+
+class RescheduleSerializer(serializers.Serializer):
+    collection_date = serializers.DateField()
+    reason = serializers.CharField(max_length=1000)
+
+
+class PayableDateChangeSerializer(serializers.ModelSerializer):
+    changed_by_name = serializers.CharField(source='changed_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = PayableDateChange
+        fields = ['id', 'old_date', 'new_date', 'reason', 'changed_by_name', 'stage_name', 'created_at']
+        read_only_fields = fields
 
 
 class PayableReadMixin(serializers.Serializer):
@@ -262,6 +248,23 @@ class PayableReadMixin(serializers.Serializer):
     is_overdue = serializers.SerializerMethodField()
     approval = serializers.SerializerMethodField()
     can_mark_paid = serializers.SerializerMethodField()
+    procurement_installments = serializers.SerializerMethodField()
+
+    def get_procurement_installments(self, obj):
+        """Procurement installments this payable settles (uses the view's prefetch)."""
+        return [
+            {
+                'id': str(link.installment_id),
+                'record_id': str(link.installment.record_id),
+                'record_number': link.installment.record.record_number,
+                'procurement_number': link.installment.record.procurement.request_number,
+                'item_description': link.installment.record.procurement.item_description,
+                'label': link.installment.label,
+                'due_date': link.installment.due_date,
+                'amount': f"{link.amount:.2f}",
+            }
+            for link in obj.installment_links.all()
+        ]
 
     def get_approved_by_name(self, obj):
         return obj.approved_by.get_full_name() if obj.approved_by else None
@@ -276,7 +279,7 @@ class PayableReadMixin(serializers.Serializer):
         # Computed once per object; approval and can_mark_paid both need it
         cache = self.context.setdefault('_approval_cache', {})
         if obj.pk not in cache:
-            cache[obj.pk] = approval_summary(obj, self.context.get('employee_id'))
+            cache[obj.pk] = approval_summary(get_approval_request(obj), self.context.get('employee_id'))
         return cache[obj.pk]
 
     def get_approval(self, obj):
@@ -290,10 +293,15 @@ class PayableReadMixin(serializers.Serializer):
         )
 
 
+COLLECTION_FIELDS = ['in_person_collection', 'collector_name', 'collector_id_number', 'collector_phone']
+# The requested date is kept; approvers may move collection_date (history on the detail view)
+SCHEDULE_FIELDS = ['requested_collection_date']
+
 READ_FIELDS = [
     'payee_type', 'payee_type_display', 'payee_name', 'payee_reference',
     'category_display', 'status_display', 'submitted_by_name',
     'approved_by_name', 'paid_by_name', 'is_overdue', 'approval', 'can_mark_paid',
+    *COLLECTION_FIELDS, 'collector_id_verified', 'procurement_installments', *SCHEDULE_FIELDS,
 ]
 
 
@@ -334,6 +342,7 @@ class PayableDetailSerializer(PayableReadMixin, serializers.ModelSerializer):
     """Serializer for payable detail views, with payee contact details."""
     vendor_details = serializers.SerializerMethodField()
     member_details = serializers.SerializerMethodField()
+    date_changes = PayableDateChangeSerializer(many=True, read_only=True)
 
     class Meta:
         model = Payable
@@ -344,6 +353,7 @@ class PayableDetailSerializer(PayableReadMixin, serializers.ModelSerializer):
             'vendor_details',
             'member',
             'member_details',
+            'date_changes',
             'invoice_number',
             'description',
             'category',
@@ -404,10 +414,16 @@ class PayableCreateUpdateSerializer(serializers.ModelSerializer):
     server-side; the payee must match payee_type and the category must suit the payee.
     """
     invoice_date = serializers.DateField(required=False)
+    # Procurement installments this payable settles (vendor payables; create only)
+    procurement_installments = serializers.ListField(
+        child=serializers.UUIDField(), required=False, allow_empty=True, write_only=True
+    )
 
     class Meta:
         model = Payable
         fields = [
+            'procurement_installments',
+            *COLLECTION_FIELDS,
             'payee_type',
             'vendor',
             'member',
@@ -478,10 +494,48 @@ class PayableCreateUpdateSerializer(serializers.ModelSerializer):
             errors['collection_date'] = 'Collection date cannot be before invoice date.'
 
         errors.update(self._validate_pay_to(attrs))
+        errors.update(self._validate_collection(attrs))
+        errors.update(self._validate_procurement(attrs, payee_type))
 
         if errors:
             raise serializers.ValidationError(errors)
         return attrs
+
+    def _validate_collection(self, attrs) -> dict:
+        """In-person collection needs to know who will collect; otherwise collector details are cleared."""
+        if not self._value(attrs, 'in_person_collection', False):
+            for field in ('collector_name', 'collector_id_number', 'collector_phone'):
+                attrs[field] = None
+            return {}
+        return {
+            field: 'Required when the payment is collected in person.'
+            for field in ('collector_name', 'collector_id_number')
+            if not (self._value(attrs, field) or '').strip()
+        }
+
+    def _validate_procurement(self, attrs, payee_type) -> dict:
+        """
+        Payables settling procurement installments are vendor payables in the Procurement
+        category; the amount is set from the installments by the view. Once created, their
+        payee, currency and amounts are fixed.
+        """
+        if self.instance is not None:
+            if 'procurement_installments' in attrs:
+                return {'procurement_installments': 'Installments cannot be changed after the payable is created.'}
+            if self.instance.installment_links.exists():
+                locked = [f for f in ('payee_type', 'vendor', 'currency', 'amount', 'tax_amount', 'category')
+                          if f in attrs and attrs[f] != getattr(self.instance, f)]
+                return {f: 'Fixed by the procurement installments this payable settles.' for f in locked}
+            return {}
+
+        if not attrs.get('procurement_installments'):
+            attrs.pop('procurement_installments', None)
+            return {}
+        if payee_type != PayeeType.VENDOR:
+            return {'procurement_installments': 'Only vendor payables can settle procurement installments.'}
+        attrs['category'] = PayableCategory.PROCUREMENT
+        attrs['tax_amount'] = Decimal('0')
+        return {}
 
     def _validate_pay_to(self, attrs) -> dict:
         """
@@ -508,6 +562,8 @@ class MarkPaidSerializer(serializers.Serializer):
     payment_method = serializers.CharField(max_length=50)
     payment_reference = serializers.CharField(max_length=50, required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
+    # Required (true) for in-person collection: the payer checked the collector's ID
+    collector_id_verified = serializers.BooleanField(required=False, default=False)
 
     def validate_paid_date(self, value):
         if value > timezone.localdate():

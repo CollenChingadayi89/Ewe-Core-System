@@ -1,3 +1,6 @@
+import uuid
+
+from django.contrib.contenttypes.fields import GenericRelation
 from django.db import models
 from django.conf import settings
 from core.models import BaseModel
@@ -142,7 +145,8 @@ class ProcurementRequest(BaseModel):
             ('replacement', 'Replacement'),
             ('rental', 'Rental'),
             ('lease', 'Lease'),
-            ('service', 'Service Contract')
+            ('service', 'Service Contract'),
+            ('installment', 'Installment Purchase'),
         ],
         default='new',
         verbose_name='Request Type'
@@ -222,6 +226,30 @@ class ProcurementRequest(BaseModel):
     # Additional Info
     notes = models.TextField(blank=True, null=True, verbose_name='Additional Notes')
 
+    # Approval requests for this procurement (GenericRelation for prefetching; no DB column)
+    approval_requests = GenericRelation(
+        'approval.ApprovalRequest',
+        content_type_field='content_type',
+        object_id_field='object_id',
+        related_query_name='procurement_request',
+    )
+
+    # Award: the final approver picks the winning quotation (its vendor becomes `vendor`)
+    selected_quotation_index = models.PositiveSmallIntegerField(
+        blank=True, null=True, verbose_name='Winning Quotation',
+        help_text='Position of the winning quotation in `quotations`'
+    )
+    selection_reason = models.TextField(blank=True, null=True, verbose_name='Reason for Selection')
+    selected_by = models.ForeignKey(
+        'hr_employee.Employee',
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='awarded_procurement_requests',
+        verbose_name='Selected By'
+    )
+    selected_at = models.DateTimeField(blank=True, null=True, verbose_name='Selected At')
+
     class Meta:
         db_table = 'finance_procurement_request'
         verbose_name = 'Procurement Request'
@@ -266,3 +294,137 @@ class ProcurementRequest(BaseModel):
             self.total_amount = self.quantity * self.unit_price
 
         super().save(*args, **kwargs)
+
+    def validate_final_approval(self):
+        """Approval-engine hook: the final approver must award a quotation before approving."""
+        if self.selected_quotation_index is None:
+            return 'Select the winning quotation (with a reason) before giving final approval.'
+        return None
+
+    def on_final_approval(self):
+        """Approval-engine hook: create the procurement record for the awarded vendor."""
+        from .records import create_procurement_record
+        create_procurement_record(self)
+
+
+class ProcurementRecord(BaseModel):
+    """
+    Created when a procurement request is finally approved: links the purchase to the
+    winning vendor and tracks what is owed through an installment schedule.
+    """
+    class Frequency(models.TextChoices):
+        ONCE = 'once', 'Single payment'
+        WEEKLY = 'weekly', 'Weekly'
+        MONTHLY = 'monthly', 'Monthly'
+        QUARTERLY = 'quarterly', 'Quarterly'
+
+    class Status(models.TextChoices):
+        AWAITING_TERMS = 'awaiting_terms', 'Awaiting Payment Terms'
+        ACTIVE = 'active', 'Active'
+        COMPLETED = 'completed', 'Fully Paid'
+        CANCELLED = 'cancelled', 'Cancelled'
+
+    record_number = models.CharField(max_length=50, unique=True, verbose_name='Record Number')
+    procurement = models.OneToOneField(
+        ProcurementRequest, on_delete=models.PROTECT, related_name='record', verbose_name='Procurement Request'
+    )
+    vendor = models.ForeignKey(
+        'finance_payable.Vendor', on_delete=models.PROTECT, related_name='procurement_records', verbose_name='Vendor'
+    )
+    currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default='ZWG', verbose_name='Currency')
+
+    # Payment terms
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name='Total Amount')
+    deposit_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name='Deposit')
+    installment_count = models.PositiveSmallIntegerField(default=1, verbose_name='Number of Installments')
+    frequency = models.CharField(max_length=10, choices=Frequency.choices, default=Frequency.ONCE, verbose_name='Frequency')
+    first_due_date = models.DateField(blank=True, null=True, verbose_name='First Due Date')
+    terms_set_by = models.ForeignKey(
+        'hr_employee.Employee', on_delete=models.SET_NULL, blank=True, null=True,
+        related_name='procurement_terms_set', verbose_name='Terms Set By'
+    )
+    terms_set_at = models.DateTimeField(blank=True, null=True, verbose_name='Terms Set At')
+
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.AWAITING_TERMS, verbose_name='Status'
+    )
+
+    class Meta:
+        db_table = 'finance_procurement_record'
+        verbose_name = 'Procurement Record'
+        verbose_name_plural = 'Procurement Records'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['vendor', 'status']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return f"{self.record_number} - {self.vendor.company_name} ({self.currency} {self.total_amount})"
+
+
+class ProcurementInstallment(models.Model):
+    """One scheduled payment on a procurement record (sequence 0 is the deposit)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    record = models.ForeignKey(ProcurementRecord, on_delete=models.CASCADE, related_name='installments')
+    sequence = models.PositiveSmallIntegerField(verbose_name='Sequence')
+    label = models.CharField(max_length=50, verbose_name='Label')
+    due_date = models.DateField(verbose_name='Due Date')
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name='Amount')
+    # Only changed by finance_procurement.services.apply_payable_payment, under a row lock
+    amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name='Amount Paid')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'finance_procurement_installment'
+        ordering = ['record', 'sequence']
+        constraints = [
+            models.UniqueConstraint(fields=['record', 'sequence'], name='unique_installment_sequence'),
+            models.CheckConstraint(
+                condition=models.Q(amount_paid__lte=models.F('amount')) & models.Q(amount_paid__gte=0),
+                name='installment_paid_within_amount',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.record.record_number} - {self.label}"
+
+    @property
+    def outstanding(self):
+        return self.amount - self.amount_paid
+
+    @property
+    def status(self) -> str:
+        if self.amount_paid >= self.amount:
+            return 'paid'
+        return 'partially_paid' if self.amount_paid > 0 else 'pending'
+
+
+class ProcurementPayment(models.Model):
+    """
+    Immutable ledger of money paid against an installment (the audit trail).
+    Created only when a linked payable is marked paid; never edited or deleted.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    installment = models.ForeignKey(ProcurementInstallment, on_delete=models.PROTECT, related_name='payments')
+    payable = models.ForeignKey(
+        'finance_payable.Payable', on_delete=models.PROTECT, related_name='procurement_payments'
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name='Amount')
+    paid_date = models.DateField(verbose_name='Paid Date')
+    recorded_by = models.ForeignKey(
+        'hr_employee.Employee', on_delete=models.PROTECT, related_name='procurement_payments_recorded'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'finance_procurement_payment'
+        ordering = ['-paid_date', '-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['installment', 'payable'], name='unique_payment_per_payable_installment'),
+            models.CheckConstraint(condition=models.Q(amount__gt=0), name='procurement_payment_positive'),
+        ]
+
+    def __str__(self):
+        return f"{self.installment} - {self.amount} ({self.paid_date})"

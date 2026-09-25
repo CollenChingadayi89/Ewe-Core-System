@@ -37,6 +37,60 @@ def get_stage_config(approval_request: ApprovalRequest, stage_number: int) -> di
     return next((s for s in workflow.stages if s['stage_number'] == stage_number), None)
 
 
+def is_final_stage(approval_request: ApprovalRequest) -> bool:
+    """True when approving the current stage would complete the workflow."""
+    next_stage = get_stage_config(approval_request, approval_request.current_stage + 1)
+    return next_stage is None or not next_stage.get('is_required', True)
+
+
+def current_action_type(approval_request: ApprovalRequest | None) -> str | None:
+    """Action type ('approve', 'pay', ...) of the request's current stage."""
+    if approval_request is None:
+        return None
+    stage = get_stage_config(approval_request, approval_request.current_stage)
+    return stage.get('action_type', 'approve') if stage else None
+
+
+def approval_summary(approval_request: ApprovalRequest | None, employee_id) -> dict | None:
+    """
+    Where an object is in its approval workflow, and whether the viewer can act now.
+    can_act mirrors the engine's check (current approver + open request).
+    """
+    if approval_request is None:
+        return None
+    stages = approval_request.workflow.stages if approval_request.workflow else []
+    stage = get_stage_config(approval_request, approval_request.current_stage)
+    is_open = approval_request.status in ('pending', 'in_progress')
+    return {
+        'id': str(approval_request.id),
+        'request_number': approval_request.request_number,
+        'status': approval_request.status,
+        'current_stage': approval_request.current_stage,
+        'total_stages': len(stages),
+        'current_stage_name': stage.get('stage_name') if stage and is_open else None,
+        'current_action_type': current_action_type(approval_request) if is_open else None,
+        'is_final_stage': bool(is_open and is_final_stage(approval_request)),
+        'current_approver_name': (
+            approval_request.current_approver.get_full_name()
+            if is_open and approval_request.current_approver else None
+        ),
+        'can_act': bool(is_open and employee_id and approval_request.current_approver_id == employee_id),
+    }
+
+
+def _check_final_approval_allowed(approval_request: ApprovalRequest) -> None:
+    """
+    Objects can refuse completion of their workflow until they are ready, by defining
+    validate_final_approval() -> str | None (an error message, or None when ready).
+    """
+    if not is_final_stage(approval_request):
+        return
+    validator = getattr(approval_request.content_object, 'validate_final_approval', None)
+    message = validator() if callable(validator) else None
+    if message:
+        raise ApprovalActionError(message)
+
+
 def _check_can_act(approval_request: ApprovalRequest, approver, action: str) -> None:
     if approval_request.current_approver_id != approver.id:
         raise ApprovalActionError(
@@ -93,6 +147,7 @@ def approve_current_stage(approval_request: ApprovalRequest, approver, comments:
     Raises ApprovalActionError if the approver cannot act on the request.
     """
     _check_can_act(approval_request, approver, 'approve')
+    _check_final_approval_allowed(approval_request)
 
     with transaction.atomic():
         workflow = approval_request.workflow
@@ -180,7 +235,96 @@ def approve_current_stage(approval_request: ApprovalRequest, approver, comments:
             approval_request.save()
 
             update_content_object_status(approval_request, approved_step=approval_step, action='approve')
+
+            # Objects can react to completing their workflow (e.g. procurement creates its record)
+            on_final_approval = getattr(approval_request.content_object, 'on_final_approval', None)
+            if callable(on_final_approval):
+                on_final_approval()
+
             notify_request_approved(approval_request, approver)
+
+    return approval_request
+
+
+CANCELLABLE_STATUSES = ('pending', 'in_progress', 'escalated')
+
+
+def workflow_participants(approval_request: ApprovalRequest) -> list:
+    """
+    Everyone involved in a request's workflow: approvers named on any stage (past, current
+    and upcoming, including the Pay stage), anyone with a step on the request, and the
+    current approver (covers role/position-based stages without named approvers).
+    """
+    from hr_employee.models import Employee
+
+    ids = set()
+    for stage in (approval_request.workflow.stages if approval_request.workflow else []):
+        ids.update(str(i) for i in stage.get('approver_employee_ids') or [])
+    ids.update(str(i) for i in approval_request.approval_steps.values_list('approver_id', flat=True))
+    if approval_request.current_approver_id:
+        ids.add(str(approval_request.current_approver_id))
+    return list(Employee.objects.filter(id__in=ids))
+
+
+def cancel_request(approval_request: ApprovalRequest, user, reason: str) -> ApprovalRequest:
+    """
+    The requester (or an admin) withdraws a request before its final approval.
+    Open steps are skipped, the underlying object is marked cancelled, and everyone in
+    the workflow is notified.
+    """
+    from .utils import create_notification
+
+    reason = (reason or '').strip()
+    if not reason:
+        raise ApprovalActionError('Cancellation reason is required')
+    canceller = getattr(user, 'employee_profile', None)
+    is_requester = canceller is not None and approval_request.requester_id == canceller.id
+    if not (is_requester or user.is_staff or user.is_superuser):
+        raise ApprovalActionError('Only the requester can cancel this request', status.HTTP_403_FORBIDDEN)
+    if approval_request.status not in CANCELLABLE_STATUSES:
+        raise ApprovalActionError(
+            f'This request is already {approval_request.status} and can no longer be cancelled'
+        )
+
+    with transaction.atomic():
+        participants = workflow_participants(approval_request)
+        now = timezone.now()
+
+        # .update(): ApprovalStep.save() would fire approval notifications/advancement
+        approval_request.approval_steps.filter(status='pending').update(status='skipped', updated_at=now)
+
+        approval_request.status = 'cancelled'
+        approval_request.rejection_reason = reason
+        approval_request.rejected_by = canceller
+        approval_request.rejection_date = now
+        approval_request.current_approver = None
+        approval_request.metadata = {
+            **(approval_request.metadata or {}),
+            'cancelled_by': str(canceller.id) if canceller else None,
+            'cancellation_reason': reason,
+            'cancelled_at': now.isoformat(),
+        }
+        approval_request.save()
+
+        update_content_object_status(approval_request, approved_step=None, action='cancel')
+
+        canceller_name = canceller.get_full_name() if canceller else user.get_full_name() or user.email
+        for employee in participants:
+            if canceller is not None and employee.id == canceller.id:
+                continue
+            create_notification(
+                recipient=employee,
+                notification_type='cancelled',
+                title=f'Request Cancelled: {approval_request.request_number}',
+                message=(
+                    f'{canceller_name} cancelled this request, so no further action is needed from you.\n\n'
+                    f'Reason: {reason}\n\n{approval_request.request_summary}'
+                ),
+                approval_request=approval_request,
+                priority='medium',
+                action_url='/approvals',
+                metadata={'request_number': approval_request.request_number, 'cancellation_reason': reason},
+            )
 
     return approval_request
 

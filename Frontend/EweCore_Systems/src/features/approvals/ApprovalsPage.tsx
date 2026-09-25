@@ -29,6 +29,7 @@ import {
   FilterOutlined,
   EyeOutlined,
   CheckOutlined,
+  StopOutlined,
   CloseOutlined,
   DollarOutlined,
   CalendarOutlined,
@@ -46,6 +47,10 @@ import type { ColumnsType } from 'antd/es/table';
 import { useAuthStore } from '../../store/authStore';
 import { useApprovalStore } from '../../store/approvalStore';
 import { ProcurementDetailsContent } from '../finance/ProcurementDetailsContent';
+import { AwardQuotationModal } from '../finance/AwardQuotationModal';
+import { CancelRequestModal } from './CancelRequestModal';
+import { approvalRequestApi } from '../../services/api/approval';
+import type { ProcurementDetailResponse } from '../../services/api/procurement';
 import type { ApprovalRequest } from '../../types';
 
 const { Title, Text } = Typography;
@@ -60,6 +65,10 @@ export const ApprovalsPage = () => {
   const [actionType, setActionType] = useState<'approve' | 'reject'>('approve');
   const [searchText, setSearchText] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  // Procurement at its final stage: the approver must select the winning quotation to approve
+  const [awardTarget, setAwardTarget] = useState<ProcurementDetailResponse | null>(null);
+  // The requester withdraws their own request (before final approval)
+  const [cancelTarget, setCancelTarget] = useState<ApprovalRequest | null>(null);
   const [form] = Form.useForm();
 
   // Fetch ALL approvals on mount (not just pending)
@@ -80,6 +89,10 @@ export const ApprovalsPage = () => {
 
   // Filter my own requests
   const myRequests = approvalRequests.filter((req) => req.requestorId === user?.id);
+
+  /** The requester can cancel their own request until it is fully approved. */
+  const canCancel = (req: ApprovalRequest) =>
+    req.requestorId === user?.id && ['pending', 'in_progress', 'escalated'].includes(req.status as string);
 
   // Statistics
   const stats = {
@@ -105,10 +118,28 @@ export const ApprovalsPage = () => {
     }
   };
 
-  const handleAction = (request: ApprovalRequest, type: 'approve' | 'reject') => {
+  const handleAction = async (request: ApprovalRequest, type: 'approve' | 'reject') => {
+    if (type === 'approve') {
+      try {
+        const details = (await approvalRequestApi.retrieve(request.id)).content_object_details;
+        if (details?.type === 'procurement' && details.approval?.is_final_stage) {
+          setAwardTarget(details as unknown as ProcurementDetailResponse);
+          return;
+        }
+      } catch {
+        // Fall back to the plain approve dialog; the server still enforces the rules
+      }
+    }
     setSelectedRequest(request);
     setActionType(type);
     setActionModalVisible(true);
+  };
+
+  const handleAwarded = (updated: ProcurementDetailResponse) => {
+    setAwardTarget(null);
+    setDrawerVisible(false);
+    message.success(`${updated.request_number} approved and awarded to ${updated.vendor_name}`);
+    fetchAllRequests();
   };
 
   const handleSubmitAction = async (values: { comments?: string }) => {
@@ -268,6 +299,11 @@ export const ApprovalsPage = () => {
                 Reject
               </Button>
             </>
+          )}
+          {canCancel(record) && (
+            <Button size="small" danger type="text" icon={<StopOutlined />} onClick={() => setCancelTarget(record)}>
+              Cancel
+            </Button>
           )}
         </Space>
       ),
@@ -881,11 +917,42 @@ export const ApprovalsPage = () => {
                 </Button>
               </Space>
             )}
+            {(() => {
+              // The drawer holds the API record; use the list row for requester/status checks
+              const listItem = approvalRequests.find((r) => r.id === selectedRequest.id);
+              return listItem && canCancel(listItem) ? (
+                <Space style={{ width: '100%', justifyContent: 'flex-end', marginTop: 12 }}>
+                  <Button danger icon={<StopOutlined />} size="large" onClick={() => setCancelTarget(listItem)}>
+                    Cancel My Request
+                  </Button>
+                </Space>
+              ) : null;
+            })()}
           </div>
         )}
       </Drawer>
 
       {/* Action Modal */}
+      <CancelRequestModal
+        key={cancelTarget?.id ?? 'none'}
+        approvalRequestId={cancelTarget?.id ?? null}
+        requestLabel={(cancelTarget as { request_number?: string } | null)?.request_number}
+        onClose={() => setCancelTarget(null)}
+        onCancelled={() => {
+          setCancelTarget(null);
+          setDrawerVisible(false);
+          message.success('Request cancelled. Everyone in the approval workflow has been notified.');
+          fetchAllRequests();
+        }}
+      />
+
+      <AwardQuotationModal
+        key={awardTarget?.id ?? 'none'}
+        procurement={awardTarget}
+        onClose={() => setAwardTarget(null)}
+        onAwarded={handleAwarded}
+      />
+
       <Modal
         title={`${actionType === 'approve' ? 'Approve' : 'Reject'} Request`}
         open={actionModalVisible}

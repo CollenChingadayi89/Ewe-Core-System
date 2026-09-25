@@ -9,6 +9,7 @@ import {
   ClockCircleOutlined,
   WarningOutlined,
   WalletOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { PageHeader, FilterBar, DataTable, StatusTag, StatCard } from '../../components/common';
@@ -22,14 +23,17 @@ import {
   type MarkPaidRequest,
   type PayableCreateRequest,
   type PayableListResponse,
+  type RescheduleRequest,
 } from '../../services/api/payables';
 import { PayableFormModal } from './PayableFormModal';
 import { PayableActionModal, type PayableAction } from './PayableActionModal';
 import { PayableDetailsDrawer } from './PayableDetailsDrawer';
+import { CancelRequestModal } from '../approvals/CancelRequestModal';
 import {
   PRIORITY_COLORS,
   approvalProgress,
   canApproveOrReject,
+  canCancelPayable,
   formatCurrencyTotals,
   formatDate,
   formatMoney,
@@ -55,6 +59,8 @@ export const PayablesPage = () => {
     approvePayable,
     rejectPayable,
     markAsPaid,
+    refreshPayable,
+    reschedulePayable,
   } = usePayablesStore();
 
   const [activeTab, setActiveTab] = useState<TabKey>('all');
@@ -134,6 +140,21 @@ export const PayablesPage = () => {
 
   const openAction = (payable: PayableListResponse, action: PayableAction) => setPendingAction({ payable, action });
 
+  const handleReschedule = async (payable: PayableListResponse, data: RescheduleRequest) => {
+    await reschedulePayable(payable.id, data);
+    message.success(`${payable.payable_number}: payment date moved to ${formatDate(data.collection_date)}. The requester has been notified.`);
+  };
+
+  // The submitter withdraws their payable (before payment)
+  const [cancelTarget, setCancelTarget] = useState<PayableListResponse | null>(null);
+  const handleCancelled = async () => {
+    const cancelled = cancelTarget;
+    setCancelTarget(null);
+    if (!cancelled) return;
+    message.success(`${cancelled.payable_number} cancelled. Everyone in the approval workflow has been notified.`);
+    await refreshPayable(cancelled.id);
+  };
+
   const columns: ColumnsType<PayableListResponse> = [
     {
       title: 'Payable',
@@ -192,10 +213,20 @@ export const PayablesPage = () => {
       key: 'due_date',
       width: 120,
       render: (date: string, record) => (
-        <Text type={record.is_overdue ? 'danger' : undefined}>
-          {formatDate(date)}
-          {record.is_overdue && <div style={{ fontSize: 12 }}>Overdue</div>}
-        </Text>
+        <>
+          <Text type={record.is_overdue ? 'danger' : undefined}>
+            {formatDate(date)}
+            {record.is_overdue && <div style={{ fontSize: 12 }}>Overdue</div>}
+          </Text>
+          {record.collection_date && (
+            <div style={{ fontSize: 12 }}>
+              <Text type="secondary">Pay on {formatDate(record.collection_date)}</Text>
+              {record.requested_collection_date && record.requested_collection_date !== record.collection_date && (
+                <Tag color="orange" style={{ marginLeft: 4 }}>Moved</Tag>
+              )}
+            </div>
+          )}
+        </>
       ),
       sorter: (a, b) => a.due_date.localeCompare(b.due_date),
     },
@@ -240,6 +271,11 @@ export const PayablesPage = () => {
                 Reject
               </Button>
             </>
+          )}
+          {canCancelPayable(record, user?.id) && (
+            <Button size="small" danger type="text" icon={<StopOutlined />} onClick={() => setCancelTarget(record)}>
+              Cancel
+            </Button>
           )}
           {record.can_mark_paid && (
             <Button size="small" type="primary" icon={<DollarOutlined />} onClick={() => openAction(record, 'pay')}>
@@ -401,6 +437,15 @@ export const PayablesPage = () => {
         payable={selectedPayable}
         onClose={() => setSelectedId(null)}
         onAction={openAction}
+        onCancelRequest={selectedPayable && canCancelPayable(selectedPayable, user?.id) ? setCancelTarget : undefined}
+      />
+
+      <CancelRequestModal
+        key={cancelTarget?.id ?? 'none'}
+        approvalRequestId={cancelTarget?.approval?.id ?? null}
+        requestLabel={cancelTarget?.payable_number}
+        onClose={() => setCancelTarget(null)}
+        onCancelled={handleCancelled}
       />
 
       <PayableActionModal
@@ -411,6 +456,7 @@ export const PayablesPage = () => {
         onApprove={handleApprove}
         onReject={handleReject}
         onPay={handlePay}
+        onReschedule={handleReschedule}
       />
     </div>
   );

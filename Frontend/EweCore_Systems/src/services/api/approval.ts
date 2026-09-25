@@ -39,6 +39,26 @@ export interface ApprovalWorkflowResponse {
   updated_at: string;
 }
 
+/**
+ * Where an object (payable, procurement, ...) is in its approval workflow, from the
+ * current user's point of view. Built by approval.services.approval_summary on the backend.
+ */
+export interface ApprovalSummary {
+  id: string;
+  request_number: string;
+  status: 'pending' | 'in_progress' | 'approved' | 'rejected' | 'cancelled' | 'escalated';
+  current_stage: number;
+  total_stages: number;
+  current_stage_name: string | null;
+  /** 'approve', 'verify', 'recommend', ... or 'pay' for the payment stage */
+  current_action_type: string | null;
+  /** Approving now would complete the workflow */
+  is_final_stage: boolean;
+  current_approver_name: string | null;
+  /** True when it is the current user's turn to act */
+  can_act: boolean;
+}
+
 // ============================================================================
 // TYPE DEFINITIONS - APPROVAL REQUEST
 // ============================================================================

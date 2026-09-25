@@ -4,6 +4,8 @@
  */
 
 import { apiClient, postFormData } from './client';
+import type { ApprovalSummary } from './approval';
+import type { PaginatedResponse } from './types';
 
 /** Uploads and document downloads can be larger than typical API calls. */
 const FILE_TRANSFER_TIMEOUT_MS = 120_000;
@@ -14,7 +16,6 @@ export const PROCUREMENT_CURRENCIES: string[] = ['ZWG', 'USD', 'ZAR'];
 /** Must match ALLOWED_EXTENSIONS / MAX_FILE_SIZE in Backend/finance_procurement/services.py */
 export const QUOTATION_ALLOWED_EXTENSIONS = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg'];
 export const QUOTATION_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
-import type { PaginatedResponse } from './types';
 
 // ============================================================================
 // TYPES
@@ -39,6 +40,8 @@ export interface ProcurementLineItemInput {
 
 /** Quotation as returned by the API. The document itself is fetched via getQuotationDocument. */
 export interface ProcurementQuotation {
+  /** Null for legacy quotations entered before vendors were linked */
+  vendor_id: string | null;
   vendor_name: string;
   is_selected: boolean;
   file_name: string | null;
@@ -50,7 +53,7 @@ export interface ProcurementQuotation {
 
 /** Quotation as sent on create; its document is uploaded alongside, in the same position. */
 export interface ProcurementQuotationInput {
-  vendor_name: string;
+  vendor_id: string;
   is_selected: boolean;
 }
 
@@ -101,6 +104,14 @@ export interface ProcurementListResponse {
   received_date: string | null;
   attachments: string[];
   notes: string | null;
+  // Award, made by the final approver
+  selected_quotation_index: number | null;
+  selection_reason: string | null;
+  selected_by_name: string | null;
+  selected_at: string | null;
+  approval: ApprovalSummary | null;
+  /** Procurement record created on final approval */
+  record: { id: string; record_number: string; status: ProcurementRecordStatus } | null;
   created_at: string;
   updated_at: string;
 }
@@ -134,6 +145,116 @@ export interface ProcurementCreateRequest {
 
 /** Fields that can be edited after creation; quotations are fixed once submitted. */
 export type ProcurementUpdateRequest = Partial<Omit<ProcurementCreateRequest, 'quotations'>>;
+
+export interface AwardRequest {
+  quotation_index: number;
+  reason: string;
+  comments?: string;
+}
+
+// ----------------------------------------------------------------------------
+// Procurement records (what is owed to the winning supplier, paid in installments)
+// ----------------------------------------------------------------------------
+
+export type ProcurementRecordStatus = 'awaiting_terms' | 'active' | 'completed' | 'cancelled';
+export type PaymentFrequency = 'once' | 'weekly' | 'monthly' | 'quarterly';
+
+export const PAYMENT_FREQUENCIES: { value: PaymentFrequency; label: string }[] = [
+  { value: 'once', label: 'Single payment' },
+  { value: 'weekly', label: 'Weekly' },
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'quarterly', label: 'Quarterly' },
+];
+
+export interface ProcurementInstallment {
+  id: string;
+  sequence: number;
+  label: string;
+  due_date: string;
+  amount: string;
+  amount_paid: string;
+  outstanding: string;
+  status: 'pending' | 'partially_paid' | 'paid';
+  /** Open payable currently covering this installment */
+  reserved_by: { id: string; payable_number: string } | null;
+}
+
+export interface ProcurementPaymentEntry {
+  id: string;
+  installment: string;
+  installment_label: string;
+  payable: string;
+  payable_number: string;
+  amount: string;
+  paid_date: string;
+  recorded_by_name: string;
+  created_at: string;
+}
+
+export interface ProcurementRecord {
+  id: string;
+  record_number: string;
+  procurement: string;
+  procurement_number: string;
+  item_description: string;
+  requested_by_name: string;
+  vendor: string;
+  vendor_name: string;
+  vendor_code: string;
+  currency: string;
+  total_amount: string;
+  deposit_amount: string;
+  installment_count: number;
+  frequency: PaymentFrequency;
+  frequency_display: string;
+  first_due_date: string | null;
+  status: ProcurementRecordStatus;
+  status_display: string;
+  terms_set_by_name: string | null;
+  terms_set_at: string | null;
+  amount_paid: string;
+  balance: string;
+  next_due: { label: string; due_date: string; outstanding: string } | null;
+  installments: ProcurementInstallment[];
+  can_edit_terms: boolean;
+  /** Detail view only: why terms can no longer change, if they can't */
+  terms_locked_reason: string | null;
+  /** Detail view only: the payment ledger */
+  payments?: ProcurementPaymentEntry[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduleRow {
+  label?: string;
+  due_date: string;
+  amount: string;
+}
+
+export interface PaymentTermsRequest {
+  total_amount: string;
+  deposit_amount: string;
+  installment_count: number;
+  frequency: PaymentFrequency;
+  first_due_date: string;
+  /** Adjusted schedule; generated from the terms when omitted */
+  installments?: ScheduleRow[];
+}
+
+/** An installment a vendor payable can settle. */
+export interface OutstandingInstallment {
+  id: string;
+  record_id: string;
+  record_number: string;
+  procurement_number: string;
+  item_description: string;
+  label: string;
+  due_date: string;
+  amount: string;
+  amount_paid: string;
+  outstanding: string;
+  currency: string;
+}
 
 export interface ProcurementFilters {
   page?: number;
@@ -220,6 +341,14 @@ export const procurementApi = {
   },
 
   /**
+   * Final approver: select the winning quotation (with a reason) and give final approval
+   */
+  award: async (id: string, data: AwardRequest): Promise<ProcurementDetailResponse> => {
+    const response = await apiClient.post(`/procurement-requests/${id}/award/`, data);
+    return response.data;
+  },
+
+  /**
    * Update existing procurement request
    */
   update: async (id: string, data: ProcurementUpdateRequest): Promise<ProcurementDetailResponse> => {
@@ -240,5 +369,35 @@ export const procurementApi = {
    */
   delete: async (id: string): Promise<void> => {
     await apiClient.delete(`/procurement-requests/${id}/`);
+  },
+};
+
+export const procurementRecordApi = {
+  list: async (params?: { page?: number; status?: string; vendor?: string; search?: string }): Promise<PaginatedResponse<ProcurementRecord>> => {
+    const response = await apiClient.get('/procurement-records/', { params });
+    return response.data;
+  },
+
+  /** Includes the payment ledger */
+  retrieve: async (id: string): Promise<ProcurementRecord> => {
+    const response = await apiClient.get(`/procurement-records/${id}/`);
+    return response.data;
+  },
+
+  setTerms: async (id: string, data: PaymentTermsRequest): Promise<ProcurementRecord> => {
+    const response = await apiClient.post(`/procurement-records/${id}/set-terms/`, data);
+    return response.data;
+  },
+
+  /** Schedule the terms would produce, without saving */
+  previewSchedule: async (data: PaymentTermsRequest): Promise<ScheduleRow[]> => {
+    const response = await apiClient.post('/procurement-records/preview-schedule/', data);
+    return response.data;
+  },
+
+  /** Installments still owed to a vendor and not held by another open payable */
+  outstandingInstallments: async (vendorId: string): Promise<OutstandingInstallment[]> => {
+    const response = await apiClient.get('/procurement-records/outstanding-installments/', { params: { vendor: vendorId } });
+    return response.data;
   },
 };
